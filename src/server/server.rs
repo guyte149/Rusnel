@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::time::Duration;
 use std::{
     error::Error, net::SocketAddr, sync::Arc
 };
@@ -29,11 +30,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
 
     // let server_crypto:
-    let server_config =
+    let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
 
-    // let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    // transport_config.max_concurrent_uni_streams(0_u8.into());
+    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+    transport_config.max_idle_timeout(None);
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
 
 
     // Bind to the specified address

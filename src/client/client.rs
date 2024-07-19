@@ -23,6 +23,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let client_config =
         quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
 
+
+
     // Create the client endpoint
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
