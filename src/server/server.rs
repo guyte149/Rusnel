@@ -13,8 +13,6 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 pub async fn run() -> Result<(), Box<dyn Error>> {
     const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
-    rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
-
     // Load TLS certificates
     println!("generating self-signed certificate");
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
