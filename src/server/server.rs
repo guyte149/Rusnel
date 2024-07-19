@@ -1,6 +1,8 @@
+use std::io::Write;
 use std::{
     error::Error, net::SocketAddr, sync::Arc
 };
+use tracing::{error, info, info_span};
 
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::Endpoint;
@@ -27,11 +29,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
 
     // let server_crypto:
-    let mut  server_config =
+    let server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
 
-    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    transport_config.max_concurrent_uni_streams(0_u8.into());
+    // let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+    // transport_config.max_concurrent_uni_streams(0_u8.into());
 
 
     // Bind to the specified address
@@ -41,26 +43,72 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     // accept incoming connections
     while let Some(conn) = endpoint.accept().await {
-            println!("accepting connection");
-            let connection = conn.await?;
-            println!("connection established");
-            tokio::spawn(handle_connection(connection));
+        info!("got a connection: {}", conn.remote_address());
+        let fut = handle_connection(conn);
+        tokio::spawn(async move {
+            if let Err(e) = fut.await {
+                error!("connection failed: {reason}", reason = e.to_string())
+            }
+        });
     }
-
     Ok(())
 }
 
-async fn handle_connection(connection: quinn::Connection) {
-    while let Some(stream) = connection.accept_uni().await.ok() {
-        tokio::spawn(handle_stream(stream));
-    }
-}
+async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> {
+    let connection = conn.await?;
+    info_span!(
+        "connection",
+        remote = %connection.remote_address(),
+        protocol = %connection
+            .handshake_data()
+            .unwrap()
+            .downcast::<quinn::crypto::rustls::HandshakeData>().unwrap()
+            .protocol
+            .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
+    );
+    async {
+        info!("established");
 
-async fn handle_stream(mut stream: quinn::RecvStream) {
-    while let Some(chunk) = stream.read_chunk(usize::MAX, true).await.ok() {
-        if let Some(chunk) = chunk {
-            println!("Received: {:?}", chunk.bytes);
+        // Each stream initiated by the client constitutes a new request.
+        loop {
+            let stream = connection.accept_bi().await;
+            let stream = match stream {
+                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                    info!("connection closed");
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+                Ok(s) => s,
+            };
+            let fut = handle_session(stream);
+            tokio::spawn(
+                async move {
+                    if let Err(e) = fut.await {
+                        error!("failed: {reason}", reason = e.to_string());
+                    }
+                }
+            );
         }
     }
+    .await?;
+    Ok(())
 }
-        
+
+async fn handle_session((mut send, mut recv): (quinn::SendStream, quinn::RecvStream),) -> Result<(), Box<dyn Error>> {
+    println!("handling session");
+    // Echo data back to the client
+    let mut buffer = [0; 512];
+    while let Ok(n) = recv.read(&mut buffer).await {
+        std::io::stdout().write_all(&buffer[..n.unwrap()]).unwrap();
+        std::io::stdout().write_all(b"\n").unwrap();
+        std::io::stdout().flush().unwrap();
+
+        if let Err(e) = send.write_all(&buffer).await {
+            eprintln!("Failed to send data: {}", e);
+            break;
+        }
+    }
+    Ok(())
+}

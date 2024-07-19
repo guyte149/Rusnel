@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use rusnel::{run_client, run_server};
+use tracing_subscriber;
 
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
@@ -21,6 +22,8 @@ enum Mode {
 
 fn main() {
     rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+
+    tracing_subscriber::fmt::init();
 
     let args = Args::parse();
 
