@@ -1,24 +1,29 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rusnel::{run_client, run_server};
 
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[derive(Parser)]
+#[command(name = "Rusnel")]
+#[command(about = "A fast tcp/udp tunnel", long_about = None)]
 struct Args {
-    /// run Rusnel as client/server
-    #[arg(short, long)]
-    mode: String
+    #[command(subcommand)]
+    mode: Mode,
+}
 
+#[derive(Subcommand)]
+enum Mode {
+    /// run Rusnel in server mode
+    Server, 
+    /// run Rusnel in client mode
+    Client 
 }
 
 fn main() {
     let args = Args::parse();
 
-    match args.mode.as_str() {
-        "server" => run_server(),
-        "client" => run_client(),
-        _ => {println!("the selected mode is invalid: {}", args.mode)}
-
+    match &args.mode {
+        Mode::Server => run_server(),
+        Mode::Client => run_client()
     }
 }
