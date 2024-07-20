@@ -3,15 +3,16 @@ use std::error::Error;
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
+use crate::ServerConfig;
 
 
 
 #[tokio::main]
-pub async fn run() -> Result<(), Box<dyn Error>> {
+pub async fn run(config: ServerConfig) -> Result<(), Box<dyn Error>> {
 
-    let endpoint = create_server_endpoint()?;
+    let endpoint = create_server_endpoint(config.host, config.port)?;
 
-    eprintln!("listening on {}", endpoint.local_addr()?);
+    info!("listening on {}", endpoint.local_addr()?);
 
     // accept incoming connections
     while let Some(conn) = endpoint.accept().await {

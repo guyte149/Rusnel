@@ -4,14 +4,16 @@ use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use quinn::ServerConfig;
 use rustls::{ServerConfig as TlsServerConfig, ClientConfig as TlsClientConfig};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::{sync::Arc, time::Duration};
 use std::error::Error;
 
 
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
-pub fn create_server_endpoint() -> Result<Endpoint, Box<dyn Error>> {
+pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint, Box<dyn Error>> {
+    let addr: SocketAddr = SocketAddr::new(host, port);
+
     let (cert, key) = get_server_certificate_and_key();
     let mut server_config = create_server_config(cert, key)?;
 
@@ -20,7 +22,6 @@ pub fn create_server_endpoint() -> Result<Endpoint, Box<dyn Error>> {
     transport_config.max_idle_timeout(None);
     transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
     
-    let addr: SocketAddr = "127.0.0.1:4433".parse()?;
 
     Ok(Endpoint::server(server_config, addr)?)
 }

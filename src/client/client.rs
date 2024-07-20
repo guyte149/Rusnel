@@ -1,19 +1,19 @@
 use tokio::io::AsyncWriteExt;
 use std::io::Write;
-use std::{error::Error, net::SocketAddr};
+use std::error::Error;
 use tracing::info;
 
 use crate::common::quic::create_client_endpoint;
+use crate::ClientConfig;
 
 #[tokio::main]
-pub async fn run() -> Result<(), Box<dyn Error>> {
+pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
     let endpoint = create_client_endpoint()?;
 
-    println!("trying to connect");
+    info!("connecting to server at: {}", config.server);
     // Connect to the server
-    let addr: SocketAddr = "127.0.0.1:4433".parse()?;
-    let connection = endpoint.connect(addr, "localhost")?.await?;
-    println!("Connected to server at {}", connection.remote_address());
+    let connection = endpoint.connect(config.server, "localhost")?.await?;
+    info!("Connected to server at {}", connection.remote_address());
 
     let (mut send, mut recv) = connection.open_bi().await?;
 

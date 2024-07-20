@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use clap::{Parser, Subcommand};
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
 use tracing_subscriber;
@@ -27,13 +27,9 @@ enum Mode {
     },
     /// run Rusnel in client mode
     Client {
-        /// defines the Rusnel server address
+        /// defines the Rusnel server address (in form of host:port)
         #[arg(value_parser)]
-        server: IpAddr,
-
-        /// defines the Rusnel server port
-        #[arg(value_parser)]
-        port: u16,
+        server: SocketAddr,
     },
 }
 
@@ -45,14 +41,14 @@ fn main() {
 
     let args = Args::parse();
 
-    match mode {
+    match args.mode {
         Mode::Server { host, port } => {
             let server_config = ServerConfig { host, port };
             println!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         },
-        Mode::Client { server, port } => {
-            let client_config = ClientConfig { server, port };
+        Mode::Client { server } => {
+            let client_config = ClientConfig { server };
             println!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         },

@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use tracing::info;
 
 pub mod client;
@@ -13,8 +13,7 @@ pub struct ServerConfig {
 
 #[derive(Debug)]
 pub struct ClientConfig {
-    pub server: IpAddr,
-    pub port: u16,
+    pub server: SocketAddr,
 }
 
 pub fn run_server(config: ServerConfig) {
