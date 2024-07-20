@@ -78,7 +78,7 @@ async fn handle_session((mut send, mut recv): (quinn::SendStream, quinn::RecvStr
         std::io::stdout().write_all(b"\n").unwrap();
         std::io::stdout().flush().unwrap();
 
-        if let Err(e) = send.write_all(&buffer).await {
+        if let Err(e) = send.write_all(&buffer[..n.unwrap()]).await {
             eprintln!("Failed to send data: {}", e);
             break;
         }
