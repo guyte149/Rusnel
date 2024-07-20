@@ -1,21 +1,39 @@
+use std::net::IpAddr;
+use tracing::info;
+
+pub mod client;
 pub mod common;
 pub mod server;
-pub mod client;
 
+#[derive(Debug)]
+pub struct ServerConfig {
+    pub host: IpAddr,
+    pub port: u16,
+}
 
-pub fn run_server() {
-    println!("running server");
-    match server::server::run() {
+#[derive(Debug)]
+pub struct ClientConfig {
+    pub server: IpAddr,
+    pub port: u16,
+}
+
+pub fn run_server(config: ServerConfig) {
+    info!("running server");
+    match server::server::run(config) {
         Ok(_) => {},
-        Err(e) => {println!("an error occurred: {}", e)}
+        Err(e) => {
+            eprintln!("an error occurred: {}", e)
+        }
     }
 }
 
 
-pub fn run_client() {
-    println!("running client");
-    match client::client::run() {
+pub fn run_client(config: ClientConfig) {
+    info!("running client");
+    match client::client::run(config) {
         Ok(_) => {},
-        Err(e) => {println!("an error occurred: {}", e)}
+        Err(e) => {
+            eprintln!("an error occured: {}", e)
+        }
     }
 }
