@@ -1,46 +1,16 @@
 use std::io::Write;
-use std::time::Duration;
-use std::{
-    error::Error, net::SocketAddr, sync::Arc
-};
+use std::error::Error;
 use tracing::{error, info, info_span};
 
-use quinn::crypto::rustls::QuicServerConfig;
-use quinn::Endpoint;
-use rcgen::generate_simple_self_signed;
-use rustls::pki_types::PrivatePkcs8KeyDer;
+use crate::common::quic::create_server_endpoint;
 
 
 
 #[tokio::main]
 pub async fn run() -> Result<(), Box<dyn Error>> {
-    const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
-    // Load TLS certificates
-    println!("generating self-signed certificate");
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-    let cert = cert.cert.into();
-    let (certs, key) = (vec![cert], key.into());
+    let endpoint = create_server_endpoint()?;
 
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-
-    server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
-
-    // let server_crypto:
-    let mut server_config =
-        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
-
-    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-
-
-    // Bind to the specified address
-    let addr: SocketAddr = "127.0.0.1:4433".parse()?;
-    let endpoint = Endpoint::server(server_config, addr)?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
     // accept incoming connections
@@ -103,6 +73,7 @@ async fn handle_session((mut send, mut recv): (quinn::SendStream, quinn::RecvStr
     // Echo data back to the client
     let mut buffer = [0; 512];
     while let Ok(n) = recv.read(&mut buffer).await {
+		std::io::stdout().write_all(n.unwrap().to_string().as_bytes()).unwrap();
         std::io::stdout().write_all(&buffer[..n.unwrap()]).unwrap();
         std::io::stdout().write_all(b"\n").unwrap();
         std::io::stdout().flush().unwrap();
