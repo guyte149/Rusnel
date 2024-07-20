@@ -1,9 +1,12 @@
-use tokio::io::AsyncWriteExt;
-use std::io::Write;
 use std::error::Error;
+use std::io::Write;
+use std::net::IpAddr;
+use quinn::{RecvStream, SendStream};
+use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use crate::common::quic::create_client_endpoint;
+use crate::common::remote::{Protocol, Remote};
 use crate::ClientConfig;
 
 #[tokio::main]
@@ -19,42 +22,36 @@ pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
 
     info!("opened streams");
 
-    send.write_all("hello world".as_bytes()).await?;
-    send.flush().await?;
-    dbg!("sent a message");
+    let (local_host, local_port, remote_host, remote_port, reversed, socks, protocol) = (
+        "127.0.0.1".parse()?,
+        1337,
+        "127.0.0.1".parse()?,
+        9000,
+        false,
+        false,
+        Protocol::Tcp,
+    );
+    let remotes = vec![Remote::new(
+        local_host,
+        local_port,
+        remote_host,
+        remote_port,
+        reversed,
+        socks,
+        protocol,
+    )];
 
-    let mut buf = [0; 512];
-    while let Ok(n) = recv.read(&mut buf).await {
-		std::io::stdout().write_all(n.unwrap().to_string().as_bytes()).unwrap();
-        std::io::stdout().write_all(&buf[..n.unwrap()]).unwrap();
-        std::io::stdout().write_all(b"\n").unwrap();
-        std::io::stdout().flush().unwrap();
+	info!("remotes are: {:?}", remotes);
 
-        let mut input = String::new();
-
-        // Prompt the user
-        print!("Enter some text: ");
-        std::io::stdout().flush().unwrap();
-
-        // Read the input
-        std::io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-
-        // Trim the newline character from the input and print it
-        let input = input.trim();
-
-        if let Err(e) = send.write_all(&input.as_bytes()).await {
-            eprintln!("Failed to send data: {}", e);
-            break;
-        }
-        send.flush().await?;
-    }
-
-    connection.close(0u32.into(), b"done");
-
-    // Give the server a fair chance to receive the close packet
-    endpoint.wait_idle().await;
+	let first_remote = &remotes[0];
+	handle_remote(send, recv, first_remote).await?;
 
     Ok(())
+}
+
+async fn handle_remote(mut send: SendStream, mut recv: RecvStream, remote: &Remote) -> Result<(), Box<dyn Error>>{
+	let serialized = serde_json::to_string(remote).unwrap(); // Serialize the struct to a JSON string
+	info!("sending a serizlized remote: {:?}", serialized);
+    send.write_all(serialized.as_bytes()).await?;
+	Ok(())
 }

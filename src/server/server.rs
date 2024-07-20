@@ -2,6 +2,7 @@ use std::io::Write;
 use std::error::Error;
 use tracing::{error, info, info_span};
 
+use crate::common::remote::Remote;
 use crate::common::quic::create_server_endpoint;
 use crate::ServerConfig;
 
@@ -72,17 +73,14 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> 
 async fn handle_session((mut send, mut recv): (quinn::SendStream, quinn::RecvStream),) -> Result<(), Box<dyn Error>> {
     println!("handling session");
     // Echo data back to the client
-    let mut buffer = [0; 512];
+    let mut buffer = [0; 1024];
     while let Ok(n) = recv.read(&mut buffer).await {
-		std::io::stdout().write_all(n.unwrap().to_string().as_bytes()).unwrap();
         std::io::stdout().write_all(&buffer[..n.unwrap()]).unwrap();
-        std::io::stdout().write_all(b"\n").unwrap();
-        std::io::stdout().flush().unwrap();
+        let msg: String = String::from_utf8(Vec::from(&buffer[..n.unwrap()])).unwrap();
+        std::io::stdout().write_all(msg.as_bytes()).unwrap();
+		let remote: Remote = serde_json::from_str(&msg).unwrap();
 
-        if let Err(e) = send.write_all(&buffer[..n.unwrap()]).await {
-            eprintln!("Failed to send data: {}", e);
-            break;
-        }
+        info!("received remote: {:?}", remote);
     }
     Ok(())
 }
