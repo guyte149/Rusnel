@@ -1,4 +1,5 @@
 # Rusnel
+![Rusnel Logo](log.webp)
 
 ## Description
 Rusnel is a high-performance tunneling tool built using Rust and leveraging the QUIC protocol. It is designed for secure and efficient data transmission with minimal latency. This tool provides robust features like automatic encryption, connection migration, and congestion control, making it ideal for various networking applications.
@@ -27,9 +28,9 @@ cargo build --release
 
 ## TODO
 - [ ] better error handling
-- [x] improve logging by adding the connection that the log is reffered to
-- [x] add sock5 tunneling support
-- [x] add reverse tunneling support
+- [ ] improve logging by adding the connection that the log is reffered to
+- [ ] add sock5 tunneling support
+- [ ] add reverse tunneling support
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add password authentication
 - [ ] add server support for real certificate and client support for custom CA
