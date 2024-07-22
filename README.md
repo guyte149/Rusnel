@@ -1,5 +1,4 @@
 # Rusnel
-![Rusnel Logo](log.webp)
 
 ## Description
 Rusnel is a high-performance tunneling tool built using Rust and leveraging the QUIC protocol. It is designed for secure and efficient data transmission with minimal latency. This tool provides robust features like automatic encryption, connection migration, and congestion control, making it ideal for various networking applications.
