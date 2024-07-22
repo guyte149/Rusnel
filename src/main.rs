@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use rusnel::macros::set_verbose;
-use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
+use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
 use std::net::{IpAddr, SocketAddr};
 use tracing::debug;
 use tracing_subscriber;
@@ -63,12 +63,12 @@ fn main() {
     match args.mode {
         Mode::Server { host, port } => {
             let server_config = ServerConfig { host, port };
-            println!("Initialized server with config: {:?}", server_config);
+            verbose!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         }
         Mode::Client { server } => {
             let client_config = ClientConfig { server };
-            println!("Initialized client with config: {:?}", client_config);
+            verbose!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }
     }

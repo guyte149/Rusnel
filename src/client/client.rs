@@ -1,10 +1,9 @@
 use std::error::Error;
-use std::io::Write;
 use quinn::{RecvStream, SendStream};
 use tracing::info;
 
 use crate::common::quic::create_client_endpoint;
-use crate::common::remote::{Protocol, Remote};
+use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse, SerdeHelper};
 use crate::{verbose, ClientConfig};
 
 #[tokio::main]
@@ -29,7 +28,7 @@ pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
         false,
         Protocol::Tcp,
     );
-    let remotes = vec![Remote::new(
+    let remotes = vec![RemoteRequest::new(
         local_host,
         local_port,
         remote_host,
@@ -42,21 +41,21 @@ pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
 	info!("remotes are: {:?}", remotes);
 
 	let first_remote = &remotes[0];
-	handle_remote(send, recv, first_remote).await?;
+	handle_remote_stream(send, recv, first_remote).await?;
 
     Ok(())
 }
 
-async fn handle_remote(mut send: SendStream, mut recv: RecvStream, remote: &Remote) -> Result<(), Box<dyn Error>>{
-	verbose!("Sending Remote to server: {:?}", remote);
-	let serialized = serde_json::to_string(remote).unwrap(); // Serialize the struct to a JSON string
+async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote: &RemoteRequest) -> Result<(), Box<dyn Error>>{
+	verbose!("Sending remote request to server: {:?}", remote);
+	let serialized = remote.to_str()?;
     send.write_all(serialized.as_bytes()).await?;
 
-	let mut buf = [0u8; 1024];
-	while let Ok(n) = recv.read(&mut buf).await {
-        std::io::stdout()
-            .write_all(n.unwrap().to_string().as_bytes())
-            .unwrap();
-	}
+	let mut buffer = [0u8; 1024];
+	let n = recv.read(&mut buffer).await?.unwrap();
+	let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
+
+	verbose!("received remote response from server: {:?}", response);
+
 	Ok(())
 }

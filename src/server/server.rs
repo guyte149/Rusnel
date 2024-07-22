@@ -1,9 +1,10 @@
 use std::error::Error;
-use std::io::Write;
+use quinn::{RecvStream, SendStream};
+use anyhow::Result;
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
-use crate::common::remote::Remote;
+use crate::common::remote::{RemoteRequest, RemoteResponse, SerdeHelper};
 use crate::{verbose, ServerConfig};
 
 #[tokio::main]
@@ -27,6 +28,8 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn Error>> {
 
 async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> {
     let connection = conn.await?;
+
+    // TODO: save the connection data to a struct and then use it in logs.
     info_span!(
         "connection",
         remote = %connection.remote_address(),
@@ -53,7 +56,7 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> 
                 }
                 Ok(s) => s,
             };
-            let fut = handle_session(stream);
+            let fut = handle_remote_stream(stream);
             tokio::spawn(async move {
                 if let Err(e) = fut.await {
                     error!("failed: {reason}", reason = e.to_string());
@@ -65,19 +68,34 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-async fn handle_session(
-    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+async fn handle_remote_stream(
+    (send, recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<(), Box<dyn Error>> {
-    verbose!("handling session with client");
 
+    verbose!("handling remote stream with client");
+
+    let request = read_remote_request(recv).await?;
+    handle_remote_request(send, request).await?;
+
+    Ok(())
+}
+
+
+async fn read_remote_request(mut recv: RecvStream) -> Result<RemoteRequest> {
     let mut buffer = [0; 1024];
-    while let Ok(n) = recv.read(&mut buffer).await {
-        std::io::stdout().write_all(&buffer[..n.unwrap()]).unwrap();
-        let msg: String = String::from_utf8(Vec::from(&buffer[..n.unwrap()])).unwrap();
-        std::io::stdout().write_all(msg.as_bytes()).unwrap();
-        let remote: Remote = serde_json::from_str(&msg).unwrap();
 
-        verbose!("received remote: {:?}", remote);
-    }
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
+
+    Ok(request)
+}
+
+async fn handle_remote_request(mut send: SendStream, request: RemoteRequest) -> Result<()> {
+    // validate remote request here (if socks5 or reversed is enabled)
+    // execute remote here
+    let response = RemoteResponse::RemoteOk;
+    verbose!("sending remote response to client {:?}", response);
+    send.write_all(response.to_str()?.as_bytes()).await?;
+
     Ok(())
 }

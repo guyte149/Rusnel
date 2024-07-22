@@ -1,5 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
-use tracing::info;
+use tracing::{info, error};
 
 pub mod client;
 pub mod common;
@@ -22,7 +22,7 @@ pub fn run_server(config: ServerConfig) {
     match server::server::run(config) {
         Ok(_) => {},
         Err(e) => {
-            eprintln!("an error occurred: {}", e)
+            error!("an error occurred: {}", e)
         }
     }
 }
@@ -33,7 +33,7 @@ pub fn run_client(config: ClientConfig) {
     match client::client::run(config) {
         Ok(_) => {},
         Err(e) => {
-            eprintln!("an error occured: {}", e)
+            error!("an error occured: {}", e)
         }
     }
 }

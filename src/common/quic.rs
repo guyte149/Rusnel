@@ -8,6 +8,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::{sync::Arc, time::Duration};
 use std::error::Error;
 
+use crate::verbose;
+
 
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
@@ -56,7 +58,7 @@ fn create_client_config() -> Result<ClientConfig, Box<dyn Error>> {
 }
 
 fn get_server_certificate_and_key() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
-    println!("generating self-signed certificate");
+    verbose!("generating self-signed certificate");
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let cert = cert.cert.into();
