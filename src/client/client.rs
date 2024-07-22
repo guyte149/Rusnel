@@ -1,13 +1,11 @@
 use std::error::Error;
 use std::io::Write;
-use std::net::IpAddr;
 use quinn::{RecvStream, SendStream};
-use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, Remote};
-use crate::ClientConfig;
+use crate::{verbose, ClientConfig};
 
 #[tokio::main]
 pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
@@ -18,7 +16,7 @@ pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
     let connection = endpoint.connect(config.server, "localhost")?.await?;
     info!("Connected to server at {}", connection.remote_address());
 
-    let (mut send, mut recv) = connection.open_bi().await?;
+    let (send, recv) = connection.open_bi().await?;
 
     info!("opened streams");
 
@@ -50,8 +48,15 @@ pub async fn run(config: ClientConfig) -> Result<(), Box<dyn Error>> {
 }
 
 async fn handle_remote(mut send: SendStream, mut recv: RecvStream, remote: &Remote) -> Result<(), Box<dyn Error>>{
+	verbose!("Sending Remote to server: {:?}", remote);
 	let serialized = serde_json::to_string(remote).unwrap(); // Serialize the struct to a JSON string
-	info!("sending a serizlized remote: {:?}", serialized);
     send.write_all(serialized.as_bytes()).await?;
+
+	let mut buf = [0u8; 1024];
+	while let Ok(n) = recv.read(&mut buf).await {
+        std::io::stdout()
+            .write_all(n.unwrap().to_string().as_bytes())
+            .unwrap();
+	}
 	Ok(())
 }

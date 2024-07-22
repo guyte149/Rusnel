@@ -4,6 +4,7 @@ use tracing::info;
 pub mod client;
 pub mod common;
 pub mod server;
+pub mod macros;
 
 #[derive(Debug)]
 pub struct ServerConfig {
