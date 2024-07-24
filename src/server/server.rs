@@ -1,6 +1,10 @@
-use std::error::Error;
-use quinn::{RecvStream, SendStream};
+use std::time::Duration;
+
 use anyhow::Result;
+use quinn::{RecvStream, SendStream};
+use tokio::io;
+use tokio::net::{TcpSocket, TcpStream};
+use tokio::time::sleep;
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
@@ -8,7 +12,7 @@ use crate::common::remote::{RemoteRequest, RemoteResponse, SerdeHelper};
 use crate::{verbose, ServerConfig};
 
 #[tokio::main]
-pub async fn run(config: ServerConfig) -> Result<(), Box<dyn Error>> {
+pub async fn run(config: ServerConfig) -> Result<()> {
     let endpoint = create_server_endpoint(config.host, config.port)?;
 
     info!("listening on {}", endpoint.local_addr()?);
@@ -26,7 +30,7 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> {
+async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
     let connection = conn.await?;
 
     // TODO: save the connection data to a struct and then use it in logs.
@@ -69,19 +73,17 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<(), Box<dyn Error>> 
 }
 
 async fn handle_remote_stream(
-    (send, recv): (quinn::SendStream, quinn::RecvStream),
-) -> Result<(), Box<dyn Error>> {
-
+    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+) -> Result<()> {
     verbose!("handling remote stream with client");
 
-    let request = read_remote_request(recv).await?;
-    handle_remote_request(send, request).await?;
+    let request = read_remote_request(&mut recv).await?;
+    handle_remote_request(&mut recv, &mut send, request).await?;
 
     Ok(())
 }
 
-
-async fn read_remote_request(mut recv: RecvStream) -> Result<RemoteRequest> {
+async fn read_remote_request(recv: &mut RecvStream) -> Result<RemoteRequest> {
     let mut buffer = [0; 1024];
 
     let n = recv.read(&mut buffer).await?.unwrap();
@@ -90,12 +92,34 @@ async fn read_remote_request(mut recv: RecvStream) -> Result<RemoteRequest> {
     Ok(request)
 }
 
-async fn handle_remote_request(mut send: SendStream, request: RemoteRequest) -> Result<()> {
+async fn handle_remote_request(
+    recv: &mut RecvStream,
+    mut send: &mut SendStream,
+    request: RemoteRequest,
+) -> Result<()> {
     // validate remote request here (if socks5 or reversed is enabled)
     // execute remote here
+
     let response = RemoteResponse::RemoteOk;
     verbose!("sending remote response to client {:?}", response);
     send.write_all(response.to_str()?.as_bytes()).await?;
+
+    sleep(Duration::from_secs(10)).await;
+
+    let mut buffer = [0u8; 1024];
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let start: String = String::from_utf8_lossy(&buffer[..n]).into();
+
+    verbose!(start);
+
+    // let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
+    // verbose!("connecting to remote: {}", remote_addr);
+    // let mut stream = TcpStream::connect(remote_addr).await?;
+    // verbose!("connected to remote: {}", remote_addr);
+
+    // let (remote_recv, remote_send) = stream.into_split();
+
+    // io::copy(reader, writer)
 
     Ok(())
 }

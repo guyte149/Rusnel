@@ -6,14 +6,14 @@ use quinn::ServerConfig;
 use rustls::{ServerConfig as TlsServerConfig, ClientConfig as TlsClientConfig};
 use std::net::{IpAddr, SocketAddr};
 use std::{sync::Arc, time::Duration};
-use std::error::Error;
+use anyhow::Result;
 
 use crate::verbose;
 
 
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
-pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint, Box<dyn Error>> {
+pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
 
     let (cert, key) = get_server_certificate_and_key();
@@ -29,7 +29,7 @@ pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint, Box<d
 }
 
 
-pub fn create_client_endpoint() -> Result<Endpoint, Box<dyn Error>> {
+pub fn create_client_endpoint() -> Result<Endpoint> {
     let client_config = create_client_config()?;
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
@@ -37,7 +37,7 @@ pub fn create_client_endpoint() -> Result<Endpoint, Box<dyn Error>> {
 }
 
 
-fn create_server_config(cert: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) -> Result<ServerConfig, Box<dyn Error>> {
+fn create_server_config(cert: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) -> Result<ServerConfig> {
     let mut server_crypto: TlsServerConfig = TlsServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert, key)?;
@@ -47,7 +47,7 @@ fn create_server_config(cert: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'
 }
 
 
-fn create_client_config() -> Result<ClientConfig, Box<dyn Error>> {
+fn create_client_config() -> Result<ClientConfig> {
     let mut client_crypto = TlsClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(SkipServerVerification::new())

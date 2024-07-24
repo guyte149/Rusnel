@@ -2,6 +2,7 @@ use anyhow::{Error, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+use std::error::Error as StdError;
 
 pub trait SerdeHelper: Serialize + DeserializeOwned {
     fn from_str(msg: &str) -> Result<Self>
@@ -32,13 +33,13 @@ pub enum Protocol {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RemoteRequest {
-    local_host: IpAddr,
-    local_port: u16,
-    remote_host: IpAddr,
-    remote_port: u16,
-    reversed: bool,
-    socks: bool,
-    protocol: Protocol,
+    pub local_host: IpAddr,
+    pub local_port: u16,
+    pub remote_host: IpAddr,
+    pub remote_port: u16,
+    pub reversed: bool,
+    pub socks: bool,
+    pub protocol: Protocol,
 }
 
 impl RemoteRequest {
@@ -72,3 +73,11 @@ pub enum RemoteResponse {
 }
 
 impl SerdeHelper for RemoteResponse {}
+
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RemoteStart {
+    remote_start: bool
+}
+
+impl SerdeHelper for RemoteStart {}
