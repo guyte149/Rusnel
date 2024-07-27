@@ -15,7 +15,7 @@ Rusnel is a high-performance tunneling tool built using Rust and leveraging the 
 ## Installation
 Clone the repository and build the project:
 ```bash
-git clone https://github.com/yourusername/rusnel.git
+git clone https://github.com/guyte149/Rusnel.git
 cd rusnel
 cargo build --release
 ```
@@ -35,7 +35,7 @@ cargo build --release
 - [ ] add server support for real certificate and client support for custom CA
 - [ ] add tls private key authentication?
 - [ ] add fake-beckend feature to server
+- [ ] client reconnect
 
 ## Contributing
-Contributions are welcome! Please read CONTRIBUTING.md for details on our code of conduct, and the process for submitting pull requests to us.
 Let me know if you'd like to add or modify any specific sections, or if there are particular details you want included that reflect your project's functionality and setup.

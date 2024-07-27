@@ -1,14 +1,11 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
-use tokio::io;
-use tokio::net::{TcpSocket, TcpStream};
-use tokio::time::sleep;
+use tokio::net::TcpStream;
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
-use crate::common::remote::{RemoteRequest, RemoteResponse, SerdeHelper};
+use crate::common::remote::{RemoteRequest, RemoteResponse};
+use crate::common::utils::SerdeHelper;
 use crate::{verbose, ServerConfig};
 
 #[tokio::main]
@@ -112,7 +109,7 @@ async fn handle_remote_request(
 
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
     verbose!("connecting to remote: {}", remote_addr);
-    let mut stream = TcpStream::connect(&remote_addr).await?;
+    let stream = TcpStream::connect(&remote_addr).await?;
     verbose!("connected to remote: {}", remote_addr);
 
     let (mut remote_recv, mut remote_send) = stream.into_split();

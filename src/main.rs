@@ -1,25 +1,19 @@
 use clap::{Parser, Subcommand};
+use clap::crate_version;
 use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
 use std::net::{IpAddr, SocketAddr};
+use std::process::exit;
 use tracing::debug;
 use tracing_subscriber;
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
-#[command(name = "Rusnel")]
+#[command(name = "Rusnel", version = crate_version!())]
 #[command(about = "A fast tcp/udp tunnel", long_about = None)]
 struct Args {
     #[command(subcommand)]
     mode: Mode,
-
-    /// enable verbose logging
-    #[arg(short, long, default_value_t = false)]
-    verbose: bool,
-
-    /// enable debug logging
-    #[arg(short, long, default_value_t = false)]
-    debug: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -33,12 +27,28 @@ enum Mode {
         /// defines Rusnel listening port
         #[arg(long, short, default_value_t = 8080)]
         port: u16,
+
+        /// enable verbose logging
+        #[arg(short, long, default_value_t = false)]
+        is_verbose: bool,
+
+        /// enable debug logging
+        #[arg(short, long, default_value_t = false)]
+        is_debug: bool,
     },
     /// run Rusnel in client mode
     Client {
         /// defines the Rusnel server address (in form of host:port)
         #[arg(value_parser)]
         server: SocketAddr,
+
+        /// enable verbose logging
+        #[arg(short, long, default_value_t = false)]
+        is_verbose: bool,
+
+        /// enable debug logging
+        #[arg(short, long, default_value_t = false)]
+        is_debug: bool,
     },
 }
 
@@ -49,27 +59,42 @@ fn main() {
 
     let args = Args::parse();
 
-    let log_level = match args.debug {
-        true => tracing::Level::DEBUG,
-        false => tracing::Level::INFO,
-    };
-    tracing_subscriber::fmt().with_max_level(log_level).init();
-
-    set_verbose(args.verbose);
-
-    debug!("is verbose enabled: {}", args.verbose);
-    debug!("is debug enabled: {}", args.debug);
-
     match args.mode {
-        Mode::Server { host, port } => {
+        Mode::Server {
+            host,
+            port,
+            is_verbose,
+            is_debug,
+        } => {
+            set_log_level(is_verbose, is_debug);
+
             let server_config = ServerConfig { host, port };
             verbose!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         }
-        Mode::Client { server } => {
+        Mode::Client {
+            server,
+            is_verbose,
+            is_debug,
+        } => {
+            set_log_level(is_verbose, is_debug);
+
             let client_config = ClientConfig { server };
             verbose!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }
     }
+}
+
+fn set_log_level(is_verbose: bool, is_debug: bool) {
+    let log_level = match is_debug {
+        true => tracing::Level::DEBUG,
+        false => tracing::Level::INFO,
+    };
+    tracing_subscriber::fmt().with_max_level(log_level).init();
+
+    set_verbose(is_verbose);
+
+    debug!("is verbose enabled: {}", is_verbose);
+    debug!("is debug enabled: {}", is_debug);
 }
