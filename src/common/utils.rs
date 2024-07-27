@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 pub trait SerdeHelper: Serialize + DeserializeOwned {
-    fn from_str(msg: &str) -> Result<Self>
+    fn from_json(msg: &str) -> Result<Self>
     where
         Self: Sized,
     {
@@ -15,10 +15,10 @@ pub trait SerdeHelper: Serialize + DeserializeOwned {
         Self: Sized,
     {
         let msg = String::from_utf8(buffer).map_err(Error::new)?;
-        Self::from_str(&msg)
+        Self::from_json(&msg)
     }
 
-    fn to_str(&self) -> Result<String> {
+    fn to_json(&self) -> Result<String> {
         serde_json::to_string(self).map_err(Error::new)
     }
 }

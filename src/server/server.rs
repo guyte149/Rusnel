@@ -99,7 +99,7 @@ async fn handle_remote_request(
 
     let response = RemoteResponse::RemoteOk;
     verbose!("sending remote response to client {:?}", response);
-    send.write_all(response.to_str()?.as_bytes()).await?;
+    send.write_all(response.to_json()?.as_bytes()).await?;
 
     let mut buffer = [0u8; 1024];
     let n = recv.read(&mut buffer).await?.unwrap();

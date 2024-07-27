@@ -1,9 +1,8 @@
-use clap::{Parser, Subcommand};
 use clap::crate_version;
+use clap::{Parser, Subcommand};
 use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
-use std::net::{IpAddr, SocketAddr};
-use std::process::exit;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use tracing::debug;
 use tracing_subscriber;
 
@@ -29,25 +28,30 @@ enum Mode {
         port: u16,
 
         /// enable verbose logging
-        #[arg(short, long, default_value_t = false)]
+        #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
 
         /// enable debug logging
-        #[arg(short, long, default_value_t = false)]
+        #[arg(long("debug"), default_value_t = false)]
         is_debug: bool,
     },
     /// run Rusnel in client mode
     Client {
         /// defines the Rusnel server address (in form of host:port)
         #[arg(value_parser)]
-        server: SocketAddr,
+        server: String,
+
+        /// remotes
+        /// TODO add a lot of infomation
+        #[arg(name = "remote", required = true , value_delimiter = ' ', num_args = 1..)]
+        remotes: Vec<String>,
 
         /// enable verbose logging
-        #[arg(short, long, default_value_t = false)]
+        #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
 
         /// enable debug logging
-        #[arg(short, long, default_value_t = false)]
+        #[arg(long("debug"), default_value_t = false)]
         is_debug: bool,
     },
 }
@@ -74,12 +78,20 @@ fn main() {
         }
         Mode::Client {
             server,
+            remotes,
             is_verbose,
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
+            let server_addr = server
+                .to_socket_addrs()
+                .expect(&format!("Failed to resolve server address: {server}"))
+                .next()
+                .unwrap();
 
-            let client_config = ClientConfig { server };
+            let client_config = ClientConfig {
+                server: server_addr,
+            };
             verbose!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }

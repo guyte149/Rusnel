@@ -44,6 +44,12 @@ impl RemoteRequest {
     }
 }
 
+impl RemoteRequest {
+    pub fn from_str() {
+        
+    }
+}
+
 impl SerdeHelper for RemoteRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -52,9 +52,8 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 
 async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote: &RemoteRequest) -> Result<()>{
 	verbose!("Sending remote request to server: {:?}", remote);
-	let serialized = remote.to_str()?;
+	let serialized = remote.to_json()?;
     send.write_all(serialized.as_bytes()).await?;
-
 	let mut buffer = [0u8; 1024];
 	let n = recv.read(&mut buffer).await?.unwrap();
 	let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
