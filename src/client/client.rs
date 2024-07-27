@@ -70,7 +70,6 @@ async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote
 }
 
 async fn listen_local_socket(mut send: SendStream, mut recv: RecvStream, local_host: IpAddr, local_port: u16) -> Result<()>{
-		verbose!("hello");
 		let local_addr = format!("{}:{}", local_host, local_port);
 	    // Listen for incoming connections
 		let listener = TcpListener::bind(&local_addr).await?;
