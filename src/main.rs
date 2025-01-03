@@ -1,8 +1,10 @@
 use clap::crate_version;
 use clap::{Parser, Subcommand};
+use rusnel::common::remote::RemoteRequest;
 use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::process;
 use tracing::debug;
 use tracing_subscriber;
 
@@ -89,8 +91,18 @@ fn main() {
                 .next()
                 .unwrap();
 
+            let mut remotes_list: Vec<RemoteRequest> = vec![];
+            for remote_str in remotes {
+                let remote = RemoteRequest::from_str(remote_str).unwrap_or_else(|error| {
+                    eprintln!("Remote parsing error: {}", error);
+                    process::exit(1);
+                });
+                remotes_list.push(remote);
+            }
+
             let client_config = ClientConfig {
                 server: server_addr,
+                remotes: remotes_list,
             };
             verbose!("Initialized client with config: {:?}", client_config);
             run_client(client_config);

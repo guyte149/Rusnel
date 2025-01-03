@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use common::remote::RemoteRequest;
 use tracing::{info, error};
 
 pub mod client;
@@ -15,6 +16,7 @@ pub struct ServerConfig {
 #[derive(Debug)]
 pub struct ClientConfig {
     pub server: SocketAddr,
+    pub remotes: Vec<RemoteRequest>
 }
 
 pub fn run_server(config: ServerConfig) {
