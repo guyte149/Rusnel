@@ -35,8 +35,8 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 
 	debug!("remotes are: {:?}", config.remotes);
 
-	let first_remote = &config.remotes[0];
-	handle_remote_stream(send, recv, first_remote).await?;
+	// TODO for remote in remotes, handle stream
+	handle_remote_stream(send, recv, &config.remotes[0]).await?;
 
     Ok(())
 }
