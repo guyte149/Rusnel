@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
@@ -23,28 +23,19 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 
     info!("opened streams");
 
-    let (local_host, local_port, remote_host, remote_port, reversed, socks, protocol) = (
-        "127.0.0.1".parse()?,
-        1337,
-        "127.0.0.1".parse()?,
-        9000,
-        false,
-        false,
-        Protocol::Tcp,
-    );
-    let remotes = vec![RemoteRequest::new(
-        local_host,
-        local_port,
-        remote_host,
-        remote_port,
-        reversed,
-        socks,
-        protocol,
-    )];
+    // let (local_host, local_port, remote_host, remote_port, reversed, socks, protocol) = (
+    //     "127.0.0.1".parse()?,
+    //     1337,
+    //     "127.0.0.1".parse()?,
+    //     9000,
+    //     false,
+    //     false,
+    //     Protocol::Tcp,
+    // );
 
-	info!("remotes are: {:?}", remotes);
+	debug!("remotes are: {:?}", config.remotes);
 
-	let first_remote = &remotes[0];
+	let first_remote = &config.remotes[0];
 	handle_remote_stream(send, recv, first_remote).await?;
 
     Ok(())

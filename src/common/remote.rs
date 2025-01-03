@@ -42,29 +42,78 @@ impl RemoteRequest {
 }
 
 impl RemoteRequest {
-    pub fn from_str(remote_str: String) -> Result<RemoteRequest>{
-        // remote_str is R/<local-interface>:<local-port>:<remote-host>:<remote-port>/<protocol>
+    pub fn from_str(remote_str: String) -> Result<RemoteRequest, String> {
+        // remote_str can be in various formats, including:
+        // <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
+        // <remote-host>:<remote-port>
+        // <local-port>:<remote-host>:<remote-port>
+        // R:<local-interface>:<local-port>:<remote-host>:<remote-port>/<protocol>
+
         let mut reversed = false;
         let mut protocol = Protocol::Tcp;
-        let splits: Vec<&str> = remote_str.split("/").collect();
-        let mut inner_remote_str = splits[0];
-        if splits[0] == "R" {
-            reversed = true;
-            inner_remote_str = splits[1];
+
+        let parts: Vec<&str> = remote_str.split('/').collect();
+        if parts.is_empty() {
+            return Err("Invalid format: Missing parts".to_string());
         }
-        else if splits.last().unwrap() == &"tcp" || splits.last().unwrap() == &"udp" {
-            if splits.last().unwrap() == &"udp" {
-                protocol = Protocol::Udp;
+
+        let mut inner_remote_str = parts[0];
+        if parts[0].starts_with("R:") {
+            reversed = true;
+            inner_remote_str = &parts[0][2..];
+        } else if parts[0] == "R" {
+            reversed = true;
+            if parts.len() < 2 {
+                return Err("Invalid format: Missing details after R".to_string());
+            }
+            inner_remote_str = parts[1];
+        }
+
+        if parts.len() > 1 {
+            match parts.last().unwrap() {
+                &"tcp" => protocol = Protocol::Tcp,
+                &"udp" => protocol = Protocol::Udp,
+                _ => return Err("Invalid protocol: Must be 'tcp' or 'udp'".to_string()),
             }
         }
-        let splits: Vec<&str> = inner_remote_str.split(":").collect();
-        //todo continue the parsing
 
-        Ok(())
+        let address_parts: Vec<&str> = inner_remote_str.split(':').collect();
 
+        // Parse address parts and apply defaults based on the format
+        let (local_host, local_port, remote_host, remote_port) = match address_parts.len() {
+            1 => {
+                let remote_port = address_parts[0].parse::<u16>().map_err(|_| "Invalid remote port")?;
+                ("0.0.0.0".to_string(), remote_port, "0.0.0.0".to_string(), remote_port)
+            }
+            2 => {
+                let remote_host = address_parts[0].to_string();
+                let remote_port = address_parts[1].parse::<u16>().map_err(|_| "Invalid remote port")?;
+                ("0.0.0.0".to_string(), remote_port, remote_host, remote_port)
+            }
+            3 => {
+                let local_port = address_parts[0].parse::<u16>().map_err(|_| "Invalid local port")?;
+                let remote_host = address_parts[1].to_string();
+                let remote_port = address_parts[2].parse::<u16>().map_err(|_| "Invalid remote port")?;
+                ("0.0.0.0".to_string(), local_port, remote_host, remote_port)
+            }
+            4 => {
+                let local_host = address_parts[0].to_string();
+                let local_port = address_parts[1].parse::<u16>().map_err(|_| "Invalid local port")?;
+                let remote_host = address_parts[2].to_string();
+                let remote_port = address_parts[3].parse::<u16>().map_err(|_| "Invalid remote port")?;
+                (local_host, local_port, remote_host, remote_port)
+            }
+            _ => return Err("Invalid format: Unexpected number of address parts".to_string()),
+        };
 
-
-
+        Ok(RemoteRequest {
+            local_host,
+            local_port,
+            remote_host,
+            remote_port,
+            reversed,
+            protocol,
+        })
     }
 }
 
