@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use quinn::{RecvStream, SendStream};
 use tokio::net::TcpListener;
 use tokio::task;
@@ -25,7 +25,6 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 	
 	let mut tasks = Vec::new();
 
-	// TODO for remote in remotes, handle stream
 	for remote in config.remotes {
 		let connection = connection.clone();
 
@@ -52,21 +51,27 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 }
 
 async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote: &RemoteRequest) -> Result<()> {
-	verbose!("Sending remote request to server: {:?}", remote);
+	debug!("Sending remote request to server: {:?}", remote);
 	let serialized = remote.to_json()?;
     send.write_all(serialized.as_bytes()).await?;
 	let mut buffer = [0u8; 1024];
 	let n = recv.read(&mut buffer).await?.unwrap();
 	let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
 
-	verbose!("received remote response from server: {:?}", response);
+	debug!("received remote response from server: {:?}", response);
 
-	// TODO check if the response is OK, if not return an error
+	match response {
+		RemoteResponse::RemoteFailed(err) => {
+			return Err(anyhow!("Remote tunnel error {}", err))
+		}
+		_ => ()
+	}
 
 	listen_local_socket(send, recv, remote.local_host, remote.local_port).await?;
 
 	Ok(())
 }
+
 
 async fn listen_local_socket(mut send: SendStream, mut recv: RecvStream, local_host: IpAddr, local_port: u16) -> Result<()> {
 		let local_addr = format!("{}:{}", local_host, local_port);
