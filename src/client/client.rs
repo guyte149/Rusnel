@@ -7,7 +7,7 @@ use tokio::task;
 use tracing::{debug, info};
 
 use crate::common::quic::create_client_endpoint;
-use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
+use crate::common::remote::{RemoteRequest, RemoteResponse};
 use crate::common::utils::SerdeHelper;
 use crate::{verbose, ClientConfig};
 
@@ -51,7 +51,7 @@ pub async fn run(config: ClientConfig) -> Result<()> {
     Ok(())
 }
 
-async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote: &RemoteRequest) -> Result<()>{
+async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote: &RemoteRequest) -> Result<()> {
 	verbose!("Sending remote request to server: {:?}", remote);
 	let serialized = remote.to_json()?;
     send.write_all(serialized.as_bytes()).await?;
@@ -68,7 +68,7 @@ async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote
 	Ok(())
 }
 
-async fn listen_local_socket(mut send: SendStream, mut recv: RecvStream, local_host: IpAddr, local_port: u16) -> Result<()>{
+async fn listen_local_socket(mut send: SendStream, mut recv: RecvStream, local_host: IpAddr, local_port: u16) -> Result<()> {
 		let local_addr = format!("{}:{}", local_host, local_port);
 	    // Listen for incoming connections
 		let listener = TcpListener::bind(&local_addr).await?;
@@ -76,7 +76,7 @@ async fn listen_local_socket(mut send: SendStream, mut recv: RecvStream, local_h
 		info!("listening on: {}", local_addr);
 	
 		// Asynchronously wait for an incoming connection
-		let (mut socket, addr) = listener.accept().await?;
+		let (socket, addr) = listener.accept().await?;
 		let (mut local_recv, mut local_send) = socket.into_split();
 
 		info!("new connection: {}", addr);

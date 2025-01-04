@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{net::IpAddr, str::FromStr};
+use std::net::IpAddr;
 use anyhow::{anyhow, Result};
 use crate::common::utils::SerdeHelper;
 

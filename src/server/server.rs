@@ -72,7 +72,7 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
 }
 
 async fn handle_remote_stream(
-    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+    (send, mut recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<()> {
     verbose!("handling remote stream with client");
 
