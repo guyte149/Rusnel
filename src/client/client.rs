@@ -1,8 +1,6 @@
-use std::net::IpAddr;
 
 use anyhow::{Result, anyhow};
 use quinn::{RecvStream, SendStream};
-use tokio::net::TcpListener;
 use tokio::task;
 use tracing::{debug, info};
 
@@ -10,7 +8,7 @@ use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
 use crate::common::tunnel::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::utils::SerdeHelper;
-use crate::{verbose, ClientConfig};
+use crate::ClientConfig;
 
 #[tokio::main]
 pub async fn run(config: ClientConfig) -> Result<()> {
@@ -55,7 +53,7 @@ async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote
 	debug!("Sending remote request to server: {:?}", remote);
 	let serialized = remote.to_json()?;
     send.write_all(serialized.as_bytes()).await?;
-	
+
 	let mut buffer = [0u8; 1024];
 	let n = recv.read(&mut buffer).await?.unwrap();
 	let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
@@ -79,12 +77,12 @@ async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote
 		}
 
 		// simple forward UDP
-		RemoteRequest{ local_host, local_port, remote_host, remote_port, reversed: false, protocol: Protocol::Udp } => {
+		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: false, protocol: Protocol::Udp } => {
 			// listen_local_socket(send, recv, remote);
 		}
 
 		// simple reverse UDP
-		RemoteRequest{ local_host, local_port, remote_host, remote_port, reversed: true, protocol: Protocol::Udp } => {
+		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: true, protocol: Protocol::Udp } => {
 			// listen_local_socket(send, recv, remote);
 		}
 

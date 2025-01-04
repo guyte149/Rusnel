@@ -1,6 +1,5 @@
 use anyhow::Result;
-use quinn::{RecvStream, SendStream};
-use tokio::net::TcpStream;
+use quinn::RecvStream;
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
@@ -96,12 +95,12 @@ async fn handle_remote_stream(
 		}
 
 		// simple forward UDP
-		RemoteRequest{ local_host, local_port, remote_host, remote_port, reversed: false, protocol: Protocol::Udp } => {
+		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: false, protocol: Protocol::Udp } => {
 			// listen_local_socket(send, recv, remote);
 		}
 
 		// simple reverse UDP
-		RemoteRequest{ local_host, local_port, remote_host, remote_port, reversed: true, protocol: Protocol::Udp } => {
+		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: true, protocol: Protocol::Udp } => {
 			// listen_local_socket(send, recv, remote);
 		}
 
