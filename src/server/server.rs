@@ -16,7 +16,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     // accept incoming connections
     while let Some(conn) = endpoint.accept().await {
-        info!("got a connection: {}", conn.remote_address());
+        info!("client connected: {}", conn.remote_address());
         let fut = handle_connection(conn);
         tokio::spawn(async move {
             if let Err(e) = fut.await {
@@ -47,6 +47,8 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
         // Each stream initiated by the client constitutes a new request.
         loop {
             let stream = connection.accept_bi().await;
+            info!("new stream accepted");
+
             let stream = match stream {
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
                     info!("connection closed");
@@ -70,7 +72,7 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
 }
 
 async fn handle_remote_stream(
-    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+    (send, mut recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<()> {
     verbose!("handling remote stream with client");
 
@@ -102,7 +104,7 @@ async fn handle_remote_request(
     send.write_all(response.to_json()?.as_bytes()).await?;
 
     let mut buffer = [0u8; 1024];
-    let n = recv.read(&mut buffer).await?.unwrap();
+    let n: usize = recv.read(&mut buffer).await?.unwrap();
     let start: String = String::from_utf8_lossy(&buffer[..n]).into();
 
     verbose!(start);

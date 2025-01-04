@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
 use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
 use tracing::debug;
 use tracing_subscriber;
