@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use tokio::net::TcpListener;
+use tokio::task;
 use tracing::{debug, info};
 
 use crate::common::quic::create_client_endpoint;
@@ -19,24 +20,33 @@ pub async fn run(config: ClientConfig) -> Result<()> {
     let connection = endpoint.connect(config.server, "localhost")?.await?;
     info!("Connected to server at {}", connection.remote_address());
 
-    let (send, recv) = connection.open_bi().await?;
-
-    info!("opened streams");
-
-    // let (local_host, local_port, remote_host, remote_port, reversed, socks, protocol) = (
-    //     "127.0.0.1".parse()?,
-    //     1337,
-    //     "127.0.0.1".parse()?,
-    //     9000,
-    //     false,
-    //     false,
-    //     Protocol::Tcp,
-    // );
-
+	
 	debug!("remotes are: {:?}", config.remotes);
+	
+	let mut tasks = Vec::new();
 
 	// TODO for remote in remotes, handle stream
-	handle_remote_stream(send, recv, &config.remotes[0]).await?;
+	for remote in config.remotes {
+		let connection = connection.clone();
+
+		let task = task::spawn(async move {
+			let (send, recv) = connection.open_bi().await.map_err(|e| {
+                eprintln!("Failed to open connection: {}", e);
+                e
+            })?;
+            info!("Opened remote stream to {:?}", remote);
+
+            handle_remote_stream(send, recv, &remote).await
+        });
+
+        tasks.push(task);
+	}
+
+	for task in tasks {
+		if let Err(e) = task.await? {
+            eprintln!("Task failed: {}", e);
+        }
+	}
 
     Ok(())
 }
@@ -55,7 +65,6 @@ async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote
 
 	listen_local_socket(send, recv, remote.local_host, remote.local_port).await?;
 
-
 	Ok(())
 }
 
@@ -73,7 +82,7 @@ async fn listen_local_socket(mut send: SendStream, mut recv: RecvStream, local_h
 		info!("new connection: {}", addr);
 
 		let remote_start = "remote_start".as_bytes();
-		verbose!("sending remote start to server");
+		debug!("sending remote start to server");
 		send.write_all(remote_start).await?;
 		
 		let client_to_server = tokio::io::copy(&mut local_recv, &mut send);
