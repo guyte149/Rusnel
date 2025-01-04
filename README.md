@@ -8,10 +8,6 @@ Rusnel is a high-performance tunneling tool built using Rust and leveraging the 
 - **Encryption**: Ensures all data transmitted through the tunnel is securely encrypted.
 - **Connection Resilience**: Supports connection migration to maintain connectivity even when network changes occur.
 
-## Requirements
-- Rust 1.58.0 or newer
-- OpenSSL for cryptographic functions
-
 ## Installation
 Clone the repository and build the project:
 ```bash
@@ -29,7 +25,7 @@ cargo build --release
 - [ ] better error handling
 - [ ] improve logging by adding the connection that the log is reffered to
 - [ ] add sock5 tunneling support
-- [ ] add reverse tunneling support
+- [v] add reverse tunneling support
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add password authentication
 - [ ] add server support for real certificate and client support for custom CA
@@ -37,5 +33,3 @@ cargo build --release
 - [ ] add fake-beckend feature to server
 - [ ] client reconnect
 
-## Contributing
-Let me know if you'd like to add or modify any specific sections, or if there are particular details you want included that reflect your project's functionality and setup.
