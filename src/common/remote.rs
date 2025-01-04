@@ -1,9 +1,7 @@
+use crate::common::utils::SerdeHelper;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
-use anyhow::{anyhow, Result};
-use crate::common::utils::SerdeHelper;
-
-
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Protocol {
@@ -82,28 +80,61 @@ impl RemoteRequest {
         // Parse address parts and apply defaults based on the format
         let (local_host, local_port, remote_host, remote_port) = match address_parts.len() {
             1 => {
-                let remote_port = address_parts[0].parse::<u16>().map_err(|_| anyhow!("Invalid remote port"))?;
-                ("0.0.0.0".parse::<IpAddr>().unwrap(), remote_port, "0.0.0.0".to_string(), remote_port)
+                let remote_port = address_parts[0]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid remote port"))?;
+                (
+                    "0.0.0.0".parse::<IpAddr>().unwrap(),
+                    remote_port,
+                    "0.0.0.0".to_string(),
+                    remote_port,
+                )
             }
             2 => {
                 let remote_host = address_parts[0].to_string();
-                let remote_port = address_parts[1].parse::<u16>().map_err(|_| anyhow!("Invalid remote port"))?;
-                ("0.0.0.0".parse::<IpAddr>().unwrap(), remote_port, remote_host, remote_port)
+                let remote_port = address_parts[1]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid remote port"))?;
+                (
+                    "0.0.0.0".parse::<IpAddr>().unwrap(),
+                    remote_port,
+                    remote_host,
+                    remote_port,
+                )
             }
             3 => {
-                let local_port = address_parts[0].parse::<u16>().map_err(|_| anyhow!("Invalid local port"))?;
+                let local_port = address_parts[0]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid local port"))?;
                 let remote_host = address_parts[1].to_string();
-                let remote_port = address_parts[2].parse::<u16>().map_err(|_| anyhow!("Invalid remote port"))?;
-                ("0.0.0.0".parse::<IpAddr>().unwrap(), local_port, remote_host, remote_port)
+                let remote_port = address_parts[2]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid remote port"))?;
+                (
+                    "0.0.0.0".parse::<IpAddr>().unwrap(),
+                    local_port,
+                    remote_host,
+                    remote_port,
+                )
             }
             4 => {
-                let local_host = address_parts[0].parse::<IpAddr>().map_err(|_| anyhow!("Invalid local host"))?;
-                let local_port = address_parts[1].parse::<u16>().map_err(|_| anyhow!("Invalid local port"))?;
+                let local_host = address_parts[0]
+                    .parse::<IpAddr>()
+                    .map_err(|_| anyhow!("Invalid local host"))?;
+                let local_port = address_parts[1]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid local port"))?;
                 let remote_host = address_parts[2].to_string();
-                let remote_port = address_parts[3].parse::<u16>().map_err(|_| anyhow!("Invalid remote port"))?;
+                let remote_port = address_parts[3]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("Invalid remote port"))?;
                 (local_host, local_port, remote_host, remote_port)
             }
-            _ => return Err(anyhow!("Invalid format: Unexpected number of address parts")),
+            _ => {
+                return Err(anyhow!(
+                    "Invalid format: Unexpected number of address parts"
+                ))
+            }
         };
 
         Ok(RemoteRequest {
@@ -127,10 +158,9 @@ pub enum RemoteResponse {
 
 impl SerdeHelper for RemoteResponse {}
 
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RemoteStart {
-    remote_start: bool
+    remote_start: bool,
 }
 
 impl SerdeHelper for RemoteStart {}

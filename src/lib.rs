@@ -1,11 +1,11 @@
-use std::net::{IpAddr, SocketAddr};
 use common::remote::RemoteRequest;
-use tracing::{info, error};
+use std::net::{IpAddr, SocketAddr};
+use tracing::{error, info};
 
 pub mod client;
 pub mod common;
-pub mod server;
 pub mod macros;
+pub mod server;
 
 #[derive(Debug)]
 pub struct ServerConfig {
@@ -16,24 +16,23 @@ pub struct ServerConfig {
 #[derive(Debug)]
 pub struct ClientConfig {
     pub server: SocketAddr,
-    pub remotes: Vec<RemoteRequest>
+    pub remotes: Vec<RemoteRequest>,
 }
 
 pub fn run_server(config: ServerConfig) {
     info!("running server");
     match server::server::run(config) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             error!("an error occurred: {}", e)
         }
     }
 }
 
-
 pub fn run_client(config: ClientConfig) {
     info!("running client");
     match client::client::run(config) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             error!("an error occured: {}", e)
         }

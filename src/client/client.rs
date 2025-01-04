@@ -1,5 +1,4 @@
-
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use quinn::{RecvStream, SendStream};
 use tokio::task;
 use tracing::{debug, info};
@@ -19,16 +18,15 @@ pub async fn run(config: ClientConfig) -> Result<()> {
     let connection = endpoint.connect(config.server, "localhost")?.await?;
     info!("Connected to server at {}", connection.remote_address());
 
-	
-	debug!("remotes are: {:?}", config.remotes);
-	
-	let mut tasks = Vec::new();
+    debug!("remotes are: {:?}", config.remotes);
 
-	for remote in config.remotes {
-		let connection = connection.clone();
+    let mut tasks = Vec::new();
 
-		let task = task::spawn(async move {
-			let (send, recv) = connection.open_bi().await.map_err(|e| {
+    for remote in config.remotes {
+        let connection = connection.clone();
+
+        let task = task::spawn(async move {
+            let (send, recv) = connection.open_bi().await.map_err(|e| {
                 eprintln!("Failed to open connection: {}", e);
                 e
             })?;
@@ -38,63 +36,90 @@ pub async fn run(config: ClientConfig) -> Result<()> {
         });
 
         tasks.push(task);
-	}
+    }
 
-	for task in tasks {
-		if let Err(e) = task.await? {
+    for task in tasks {
+        if let Err(e) = task.await? {
             eprintln!("Task failed: {}", e);
         }
-	}
+    }
 
     Ok(())
 }
 
-async fn handle_remote_stream(mut send: SendStream, mut recv: RecvStream, remote: &RemoteRequest) -> Result<()> {
-	debug!("Sending remote request to server: {:?}", remote);
-	let serialized = remote.to_json()?;
+async fn handle_remote_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    remote: &RemoteRequest,
+) -> Result<()> {
+    debug!("Sending remote request to server: {:?}", remote);
+    let serialized = remote.to_json()?;
     send.write_all(serialized.as_bytes()).await?;
 
-	let mut buffer = [0u8; 1024];
-	let n = recv.read(&mut buffer).await?.unwrap();
-	let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
+    let mut buffer = [0u8; 1024];
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
 
-	match response {
-		RemoteResponse::RemoteFailed(err) => {
-			return Err(anyhow!("Remote tunnel error {}", err))
-		}
-		_ => {debug!("remote response {:?}", response)}
-	}
+    match response {
+        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error {}", err)),
+        _ => {
+            debug!("remote response {:?}", response)
+        }
+    }
 
-	match remote {
-		// simple forward TCP
-		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: false, protocol: Protocol::Tcp } => {
-			tunnel_tcp_client(send, recv, remote).await?;
-		}
+    match remote {
+        // simple forward TCP
+        RemoteRequest {
+            local_host: _,
+            local_port: _,
+            remote_host: _,
+            remote_port: _,
+            reversed: false,
+            protocol: Protocol::Tcp,
+        } => {
+            tunnel_tcp_client(send, recv, remote).await?;
+        }
 
-		// simple reverse TCP
-		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: true, protocol: Protocol::Tcp } => {
-			tunnel_tcp_server(recv, send, remote).await?;
-		}
+        // simple reverse TCP
+        RemoteRequest {
+            local_host: _,
+            local_port: _,
+            remote_host: _,
+            remote_port: _,
+            reversed: true,
+            protocol: Protocol::Tcp,
+        } => {
+            tunnel_tcp_server(recv, send, remote).await?;
+        }
 
-		// simple forward UDP
-		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: false, protocol: Protocol::Udp } => {
-			// listen_local_socket(send, recv, remote);
-		}
+        // simple forward UDP
+        RemoteRequest {
+            local_host: _,
+            local_port: _,
+            remote_host: _,
+            remote_port: _,
+            reversed: false,
+            protocol: Protocol::Udp,
+        } => {
+            // listen_local_socket(send, recv, remote);
+        }
 
-		// simple reverse UDP
-		RemoteRequest{ local_host: _, local_port: _, remote_host: _, remote_port: _, reversed: true, protocol: Protocol::Udp } => {
-			// listen_local_socket(send, recv, remote);
-		}
+        // simple reverse UDP
+        RemoteRequest {
+            local_host: _,
+            local_port: _,
+            remote_host: _,
+            remote_port: _,
+            reversed: true,
+            protocol: Protocol::Udp,
+        } => {
+            // listen_local_socket(send, recv, remote);
+        } // socks5
+          // TODO
 
-		// socks5
-		// TODO
+          // reverse socks5
+          // TODO
+    }
 
-		// reverse socks5
-		// TODO
-
-	}
-	
-	Ok(())
+    Ok(())
 }
-
-
