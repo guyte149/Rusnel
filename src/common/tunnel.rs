@@ -77,37 +77,31 @@ pub async fn tunnel_tcp_server(
     Ok(())
 }
 
-
 pub async fn tunnel_udp_client(
     mut send: SendStream,
     mut recv: RecvStream,
     remote: &RemoteRequest,
 ) -> Result<()> {
-    let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
-    let listener = Arc::new(UdpSocket::bind(&local_addr).await?);
+    let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
+    let listener = Arc::new(UdpSocket::bind(&listen_addr).await?);
 
     let local_recv = Arc::clone(&listener);
     let local_send = Arc::clone(&listener);
 
-    info!("listening on UDP: {}", local_addr);
+    info!("listening on UDP: {}", listen_addr);
 
     let mut buffer = [0u8; 1024];
-    let (n, addr) = local_recv.recv_from(&mut buffer).await?;
+    let (n, local_conn_addr) = local_recv.recv_from(&mut buffer).await?;
 
-    verbose!("received UDP packet from: {}", addr);
-
-    let remote_start = "remote_start".as_bytes();
-    debug!("sending remote start to server");
-    send.write_all(remote_start).await?;
+    verbose!("received UDP packet from: {}", local_conn_addr);
 
     send.write_all(&buffer[..n]).await?;
-
 
     let client_to_server = async {
         let mut buf = vec![0u8; 1024];
         loop {
-        let (len, addr) = local_recv.recv_from(&mut buf).await?;
-        send.write_all(&buf[..len]).await?;
+            let (len, _) = local_recv.recv_from(&mut buf).await?;
+            send.write_all(&buf[..len]).await?;
         }
         #[allow(unreachable_code)]
         Ok::<(), tokio::io::Error>(()) // Ensures it returns a Result
@@ -117,22 +111,19 @@ pub async fn tunnel_udp_client(
         let mut buf = vec![0u8; 1024];
         loop {
             let len = recv.read(&mut buf).await?.unwrap();
-            local_send.send_to(&buf[..len], &local_addr).await?;
+            local_send.send_to(&buf[..len], &local_conn_addr).await?;
         }
         #[allow(unreachable_code)]
         Ok::<(), tokio::io::Error>(()) // Ensures it returns a Result
     };
 
     match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => println!(
-            "Finish udp forwarding"
-        ),
+        Ok(_) => println!("Finish udp forwarding"),
         Err(e) => eprintln!("Failed to forward: {}", e),
     };
 
     Ok(())
 }
-
 
 pub async fn tunnel_udp_server(
     mut recv: RecvStream,
@@ -140,18 +131,37 @@ pub async fn tunnel_udp_server(
     request: &RemoteRequest,
 ) -> Result<()> {
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
-    let listener = UdpSocket::bind("0.0.0.0:0").await?;
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+
+    let remote_recv = Arc::clone(&socket);
+    let remote_send = Arc::clone(&socket);
 
     verbose!("connecting to remote UDP: {}", remote_addr);
 
-    let mut buffer = [0u8; 1024];
-    let n = recv.read(&mut buffer).await?.unwrap();
-    listener.send_to(&buffer[..n], &remote_addr).await?;
+    let client_to_server = async {
+        let mut buf = vec![0u8; 1024];
+        loop {
+            let (len, _) = remote_recv.recv_from(&mut buf).await?;
+            send.write_all(&buf[..len]).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), tokio::io::Error>(()) // Ensures it returns a Result
+    };
 
-    let (n, addr) = listener.recv_from(&mut buffer).await?;
-    verbose!("received UDP response from: {}", addr);
+    let server_to_client = async {
+        let mut buf = vec![0u8; 1024];
+        loop {
+            let len = recv.read(&mut buf).await?.unwrap();
+            remote_send.send_to(&buf[..len], &remote_addr).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), tokio::io::Error>(()) // Ensures it returns a Result
+    };
 
-    send.write_all(&buffer[..n]).await?;
+    match tokio::try_join!(client_to_server, server_to_client) {
+        Ok(_) => println!("Finish udp forwarding"),
+        Err(e) => eprintln!("Failed to forward: {}", e),
+    };
 
     Ok(())
 }

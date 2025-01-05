@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
-use crate::common::tunnel::{tunnel_tcp_client, tunnel_tcp_server};
+use crate::common::tunnel::{tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client, tunnel_udp_server};
 use crate::common::utils::SerdeHelper;
 use crate::ClientConfig;
 
@@ -101,7 +101,7 @@ async fn handle_remote_stream(
             reversed: false,
             protocol: Protocol::Udp,
         } => {
-            // listen_local_socket(send, recv, remote);
+            tunnel_udp_client(send, recv, remote).await?;
         }
 
         // simple reverse UDP
@@ -113,7 +113,7 @@ async fn handle_remote_stream(
             reversed: true,
             protocol: Protocol::Udp,
         } => {
-            // listen_local_socket(send, recv, remote);
+            tunnel_udp_server(recv, send, remote).await?;
         } // socks5
           // TODO
 
