@@ -9,6 +9,7 @@ use crate::verbose;
 
 use super::remote::RemoteRequest;
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_tcp_client(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -45,6 +46,7 @@ pub async fn tunnel_tcp_client(
     Ok(())
 }
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_tcp_server(
     mut recv: RecvStream,
     mut send: SendStream,
@@ -77,6 +79,7 @@ pub async fn tunnel_tcp_server(
     Ok(())
 }
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_udp_client(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -125,6 +128,7 @@ pub async fn tunnel_udp_client(
     Ok(())
 }
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_udp_server(
     mut recv: RecvStream,
     mut send: SendStream,
