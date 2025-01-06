@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use quinn::{RecvStream, SendStream};
+use quinn::{Connection, RecvStream, SendStream};
 use tokio::task;
 use tracing::{debug, info};
 
@@ -34,7 +34,7 @@ pub async fn run(config: ClientConfig) -> Result<()> {
             })?;
             info!("Opened remote stream to {:?}", remote);
 
-            handle_remote_stream(send, recv, &remote).await
+            handle_remote_stream(connection, send, recv, remote).await
         });
 
         tasks.push(task);
@@ -50,9 +50,10 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 }
 
 async fn handle_remote_stream(
+    connection: Connection,
     mut send: SendStream,
     mut recv: RecvStream,
-    remote: &RemoteRequest,
+    remote: RemoteRequest,
 ) -> Result<()> {
     debug!("Sending remote request to server: {:?}", remote);
     let serialized = remote.to_json()?;

@@ -30,6 +30,7 @@ cargo build --release
 - [ ] improve logging by adding the connection that the log is reffered to
 - [ ] add sock5 tunneling support
 - [v] add reverse tunneling support
+- [ ] support multiple connections through a single tunnel
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add password authentication
 - [ ] add server support for real certificate and client support for custom CA

@@ -3,13 +3,13 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Protocol {
     Tcp,
     Udp,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RemoteRequest {
     pub local_host: IpAddr,
     pub local_port: u16,

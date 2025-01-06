@@ -4,7 +4,9 @@ use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
-use crate::common::tunnel::{tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client, tunnel_udp_server};
+use crate::common::tunnel::{
+    tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client, tunnel_udp_server,
+};
 use crate::common::utils::SerdeHelper;
 use crate::{verbose, ServerConfig};
 
@@ -17,7 +19,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     // accept incoming connections
     while let Some(conn) = endpoint.accept().await {
         info!("client connected: {}", conn.remote_address());
-        let fut = handle_connection(conn);
+        let fut = handle_client_connection(conn);
         tokio::spawn(async move {
             if let Err(e) = fut.await {
                 error!("connection failed: {reason}", reason = e.to_string())
@@ -27,10 +29,10 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
+async fn handle_client_connection(conn: quinn::Incoming) -> Result<()> {
     let connection = conn.await?;
 
-    // TODO: save the connection data to a struct and then use it in logs.
+    // TODO: save the connection data to a struct (ClientInfo) and then use it in logs.
     info_span!(
         "connection",
         remote = %connection.remote_address(),
@@ -42,7 +44,6 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
             .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
     );
     async {
-        info!("established");
 
         // Each stream initiated by the client constitutes a new request.
         loop {
