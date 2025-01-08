@@ -1,18 +1,78 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use quinn::{RecvStream, SendStream};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info};
 
+use crate::common::remote::RemoteResponse;
+use crate::common::utils::SerdeHelper;
 use crate::verbose;
 
 use super::remote::RemoteRequest;
 
+pub async fn client_send_remote_request(
+    remote: &RemoteRequest,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    // Send remote request to Rusnel server
+    debug!("Sending remote request to server: {:?}", remote);
+    let serialized = remote.to_json()?;
+    send.write_all(serialized.as_bytes()).await?;
+
+    // Receive remote response
+    let mut buffer = [0u8; 1024];
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
+
+    // validate remote response
+    match response {
+        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error {}", err)),
+        _ => {
+            debug!("remote response {:?}", response)
+        }
+    }
+
+    info!("Created remote stream to {:?}", remote);
+
+    Ok(())
+}
+
+pub async fn client_send_remote_start(send: &mut SendStream, remote: RemoteRequest) -> Result<()> {
+    let remote_start = "remote_start".as_bytes();
+    debug!("sending remote start to server");
+    send.write_all(remote_start).await?;
+
+    info!("Starting remote stream to {:?}", remote);
+
+    // TODO - maybe validate server "remoted started"
+    Ok(())
+}
+
+pub async fn server_recieve_remote_request(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<RemoteRequest> {
+    // Read remote request from Rusnel client
+    let mut buffer = [0; 1024];
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
+
+    // TODO - add some kind of validation?
+
+    let response = RemoteResponse::RemoteOk;
+    verbose!("sending remote response to client {:?}", response);
+    send.write_all(response.to_json()?.as_bytes()).await?;
+    Ok(request)
+}
+
+// TODO - add support for multiple connections through tunnel
+// TODO - get the local TcpStream as a parameter for reuse of this function in socks
 pub async fn tunnel_tcp_client(
     mut send: SendStream,
     mut recv: RecvStream,
-    remote: &RemoteRequest,
+    remote: RemoteRequest,
 ) -> Result<()> {
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
     // Listen for incoming connections
@@ -23,13 +83,10 @@ pub async fn tunnel_tcp_client(
 
     // Asynchronously wait for an incoming connection
     let (socket, addr) = listener.accept().await?;
+    verbose!("new application connected to tunnel: {}", addr);
+    client_send_remote_start(&mut send, remote).await?;
+
     let (mut local_recv, mut local_send) = socket.into_split();
-
-    verbose!("new tunnel connection: {}", addr);
-
-    let remote_start = "remote_start".as_bytes();
-    debug!("sending remote start to server");
-    send.write_all(remote_start).await?;
 
     let client_to_server = tokio::io::copy(&mut local_recv, &mut send);
     let server_to_client = tokio::io::copy(&mut recv, &mut local_send);
@@ -45,10 +102,11 @@ pub async fn tunnel_tcp_client(
     Ok(())
 }
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_tcp_server(
     mut recv: RecvStream,
     mut send: SendStream,
-    request: &RemoteRequest,
+    request: RemoteRequest,
 ) -> Result<()> {
     let mut buffer = [0u8; 1024];
     let n: usize = recv.read(&mut buffer).await?.unwrap();
@@ -77,10 +135,11 @@ pub async fn tunnel_tcp_server(
     Ok(())
 }
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_udp_client(
     mut send: SendStream,
     mut recv: RecvStream,
-    remote: &RemoteRequest,
+    remote: RemoteRequest,
 ) -> Result<()> {
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let listener = Arc::new(UdpSocket::bind(&listen_addr).await?);
@@ -125,10 +184,11 @@ pub async fn tunnel_udp_client(
     Ok(())
 }
 
+// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_udp_server(
     mut recv: RecvStream,
     mut send: SendStream,
-    request: &RemoteRequest,
+    request: RemoteRequest,
 ) -> Result<()> {
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);

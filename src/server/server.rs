@@ -1,23 +1,24 @@
 use anyhow::Result;
-use quinn::RecvStream;
+
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
-use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
-use crate::common::tunnel::{tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client, tunnel_udp_server};
-use crate::common::utils::SerdeHelper;
+use crate::common::remote::{Protocol, RemoteRequest};
+use crate::common::tunnel::{
+    server_recieve_remote_request, tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client,
+    tunnel_udp_server,
+};
 use crate::{verbose, ServerConfig};
 
 #[tokio::main]
 pub async fn run(config: ServerConfig) -> Result<()> {
     let endpoint = create_server_endpoint(config.host, config.port)?;
-
     info!("listening on {}", endpoint.local_addr()?);
 
-    // accept incoming connections
+    // accept incoming clients
     while let Some(conn) = endpoint.accept().await {
         info!("client connected: {}", conn.remote_address());
-        let fut = handle_connection(conn);
+        let fut = handle_client_connection(conn);
         tokio::spawn(async move {
             if let Err(e) = fut.await {
                 error!("connection failed: {reason}", reason = e.to_string())
@@ -27,10 +28,10 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
+async fn handle_client_connection(conn: quinn::Incoming) -> Result<()> {
     let connection = conn.await?;
 
-    // TODO: save the connection data to a struct and then use it in logs.
+    // TODO: save the connection data to a struct (ClientInfo) and then use it in logs.
     info_span!(
         "connection",
         remote = %connection.remote_address(),
@@ -41,10 +42,9 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
             .protocol
             .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
     );
-    async {
-        info!("established");
 
-        // Each stream initiated by the client constitutes a new request.
+    async {
+        // Each stream initiated by the client constitutes a new remote request.
         loop {
             let stream = connection.accept_bi().await;
             info!("new stream accepted");
@@ -55,6 +55,7 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
                     return Ok(());
                 }
                 Err(e) => {
+                    info!("some error occured");
                     return Err(e);
                 }
                 Ok(s) => s,
@@ -71,26 +72,12 @@ async fn handle_connection(conn: quinn::Incoming) -> Result<()> {
     Ok(())
 }
 
-async fn read_remote_request(recv: &mut RecvStream) -> Result<RemoteRequest> {
-    let mut buffer = [0; 1024];
-
-    let n = recv.read(&mut buffer).await?.unwrap();
-    let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
-
-    Ok(request)
-}
-
 async fn handle_remote_stream(
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<()> {
     verbose!("handling remote stream with client");
 
-    let request = read_remote_request(&mut recv).await?;
-
-    // TODO - add some kind of validation?
-    let response = RemoteResponse::RemoteOk;
-    verbose!("sending remote response to client {:?}", response);
-    send.write_all(response.to_json()?.as_bytes()).await?;
+    let request = server_recieve_remote_request(&mut send, &mut recv).await?;
 
     match request {
         // simple forward TCP
@@ -102,7 +89,7 @@ async fn handle_remote_stream(
             reversed: false,
             protocol: Protocol::Tcp,
         } => {
-            tunnel_tcp_server(recv, send, &request).await?;
+            tunnel_tcp_server(recv, send, request).await?;
         }
 
         // simple reverse TCP
@@ -114,7 +101,7 @@ async fn handle_remote_stream(
             reversed: true,
             protocol: Protocol::Tcp,
         } => {
-            tunnel_tcp_client(send, recv, &request).await?;
+            tunnel_tcp_client(send, recv, request).await?;
         }
 
         // simple forward UDP
@@ -126,7 +113,7 @@ async fn handle_remote_stream(
             reversed: false,
             protocol: Protocol::Udp,
         } => {
-            tunnel_udp_server(recv, send, &request).await?;
+            tunnel_udp_server(recv, send, request).await?;
         }
 
         // simple reverse UDP
@@ -138,11 +125,8 @@ async fn handle_remote_stream(
             reversed: true,
             protocol: Protocol::Udp,
         } => {
-            tunnel_udp_client(send, recv, &request).await?;
-        } // socks5
-          // TODO
-
-          // reverse socks5
+            tunnel_udp_client(send, recv, request).await?;
+        } // reverse socks5
           // TODO
     }
 
