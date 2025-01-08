@@ -1,14 +1,15 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::task;
 use tracing::{debug, info};
 
 use crate::common::quic::create_client_endpoint;
-use crate::common::remote::{Protocol, RemoteRequest, RemoteResponse};
+use crate::common::remote::{Protocol, RemoteRequest};
+use crate::common::socks::tunnel_socks_client;
 use crate::common::tunnel::{
-    tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client, tunnel_udp_server,
+    client_send_remote_request, tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client,
+    tunnel_udp_server,
 };
-use crate::common::utils::SerdeHelper;
 use crate::ClientConfig;
 
 #[tokio::main]
@@ -16,7 +17,6 @@ pub async fn run(config: ClientConfig) -> Result<()> {
     let endpoint = create_client_endpoint()?;
 
     info!("connecting to server at: {}", config.server);
-    // Connect to the server
     let connection = endpoint.connect(config.server, "localhost")?.await?;
     info!("Connected to server at {}", connection.remote_address());
 
@@ -32,8 +32,6 @@ pub async fn run(config: ClientConfig) -> Result<()> {
                 eprintln!("Failed to open connection: {}", e);
                 e
             })?;
-            info!("Opened remote stream to {:?}", remote);
-
             handle_remote_stream(connection, send, recv, remote).await
         });
 
@@ -50,27 +48,24 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 }
 
 async fn handle_remote_stream(
-    connection: Connection,
+    quic_connection: Connection,
     mut send: SendStream,
     mut recv: RecvStream,
     remote: RemoteRequest,
 ) -> Result<()> {
-    debug!("Sending remote request to server: {:?}", remote);
-    let serialized = remote.to_json()?;
-    send.write_all(serialized.as_bytes()).await?;
-
-    let mut buffer = [0u8; 1024];
-    let n = recv.read(&mut buffer).await?.unwrap();
-    let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
-
-    match response {
-        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error {}", err)),
-        _ => {
-            debug!("remote response {:?}", response)
-        }
-    }
-
     match remote {
+        // socks
+        RemoteRequest {
+            local_host: _,
+            local_port: _,
+            remote_host: ref remote_host_ref,
+            remote_port: 0,
+            reversed: false,
+            protocol: Protocol::Tcp,
+        } if remote_host_ref == "socks" => {
+            tunnel_socks_client(quic_connection, remote).await?;
+        }
+
         // simple forward TCP
         RemoteRequest {
             local_host: _,
@@ -80,6 +75,7 @@ async fn handle_remote_stream(
             reversed: false,
             protocol: Protocol::Tcp,
         } => {
+            client_send_remote_request(&remote, &mut send, &mut recv).await?;
             tunnel_tcp_client(send, recv, remote).await?;
         }
 
@@ -92,6 +88,7 @@ async fn handle_remote_stream(
             reversed: true,
             protocol: Protocol::Tcp,
         } => {
+            client_send_remote_request(&remote, &mut send, &mut recv).await?;
             tunnel_tcp_server(recv, send, remote).await?;
         }
 
@@ -104,6 +101,7 @@ async fn handle_remote_stream(
             reversed: false,
             protocol: Protocol::Udp,
         } => {
+            client_send_remote_request(&remote, &mut send, &mut recv).await?;
             tunnel_udp_client(send, recv, remote).await?;
         }
 
@@ -116,12 +114,9 @@ async fn handle_remote_stream(
             reversed: true,
             protocol: Protocol::Udp,
         } => {
+            client_send_remote_request(&remote, &mut send, &mut recv).await?;
             tunnel_udp_server(recv, send, remote).await?;
-        } // socks5
-          // TODO
-
-          // reverse socks5
-          // TODO
+        }
     }
 
     Ok(())

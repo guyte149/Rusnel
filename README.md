@@ -26,10 +26,13 @@ cargo build --release
 ```
 
 ## TODO
+- [ ] write tests for tcp, udp, reverse and socks
+- [ ] Rusnel never shuts down connection with remote (check)
 - [ ] better error handling
 - [ ] improve logging by adding the connection that the log is reffered to
 - [ ] add sock5 tunneling support
 - [v] add reverse tunneling support
+- [ ] add server --allow-reverse flag
 - [ ] support multiple connections through a single tunnel
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add password authentication
@@ -37,4 +40,5 @@ cargo build --release
 - [ ] add tls private key authentication?
 - [ ] add fake-beckend feature to server
 - [ ] client reconnect
+- [ ] randomize tls keys on compilation
 

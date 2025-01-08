@@ -79,44 +79,76 @@ impl RemoteRequest {
 
         // Parse address parts and apply defaults based on the format
         let (local_host, local_port, remote_host, remote_port) = match address_parts.len() {
-            1 => {
-                let remote_port = address_parts[0]
-                    .parse::<u16>()
-                    .map_err(|_| anyhow!("Invalid remote port"))?;
-                (
+            1 => match address_parts[0] {
+                "socks" => (
                     "0.0.0.0".parse::<IpAddr>().unwrap(),
-                    remote_port,
-                    "0.0.0.0".to_string(),
-                    remote_port,
-                )
-            }
-            2 => {
-                let remote_host = address_parts[0].to_string();
-                let remote_port = address_parts[1]
-                    .parse::<u16>()
-                    .map_err(|_| anyhow!("Invalid remote port"))?;
-                (
-                    "0.0.0.0".parse::<IpAddr>().unwrap(),
-                    remote_port,
-                    remote_host,
-                    remote_port,
-                )
-            }
-            3 => {
-                let local_port = address_parts[0]
-                    .parse::<u16>()
-                    .map_err(|_| anyhow!("Invalid local port"))?;
-                let remote_host = address_parts[1].to_string();
-                let remote_port = address_parts[2]
-                    .parse::<u16>()
-                    .map_err(|_| anyhow!("Invalid remote port"))?;
-                (
-                    "0.0.0.0".parse::<IpAddr>().unwrap(),
-                    local_port,
-                    remote_host,
-                    remote_port,
-                )
-            }
+                    1080,
+                    String::from("socks"),
+                    0,
+                ),
+                _ => {
+                    let remote_port = address_parts[0]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow!("Invalid remote port"))?;
+                    (
+                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        remote_port,
+                        "0.0.0.0".to_string(),
+                        remote_port,
+                    )
+                }
+            },
+            2 => match address_parts[1] {
+                "socks" => {
+                    let local_port = address_parts[0]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow!("Invalid remote port"))?;
+                    (
+                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        local_port,
+                        String::from("socks"),
+                        0,
+                    )
+                }
+                _ => {
+                    let remote_host = address_parts[0].to_string();
+                    let remote_port = address_parts[1]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow!("Invalid remote port"))?;
+                    (
+                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        remote_port,
+                        remote_host,
+                        remote_port,
+                    )
+                }
+            },
+            3 => match address_parts[2] {
+                "socks" => {
+                    let local_host = address_parts[0]
+                        .parse::<IpAddr>()
+                        .map_err(|_| anyhow!("Invalid local host"))?;
+                    let local_port = address_parts[1]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow!("Invalid local port"))?;
+                    (local_host, local_port, String::from("socks"), 0)
+                }
+                _ => {
+                    let local_port = address_parts[0]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow!("Invalid local port"))?;
+                    let remote_host = address_parts[1].to_string();
+                    let remote_port = address_parts[2]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow!("Invalid remote port"))?;
+                    (
+                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        local_port,
+                        remote_host,
+                        remote_port,
+                    )
+                }
+            },
             4 => {
                 let local_host = address_parts[0]
                     .parse::<IpAddr>()

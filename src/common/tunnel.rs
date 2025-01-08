@@ -1,18 +1,74 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use quinn::{Connection, RecvStream, SendStream};
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt}; 
-// Import AsyncReadExt for read_exact
+use quinn::{RecvStream, SendStream};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info};
 
+use crate::common::remote::RemoteResponse;
+use crate::common::utils::SerdeHelper;
 use crate::verbose;
 
 use super::remote::RemoteRequest;
 
-// TODO - add support for multiple connections throuth tunnel
+pub async fn client_send_remote_request(
+    remote: &RemoteRequest,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    // Send remote request to Rusnel server
+    debug!("Sending remote request to server: {:?}", remote);
+    let serialized = remote.to_json()?;
+    send.write_all(serialized.as_bytes()).await?;
+
+    // Receive remote response
+    let mut buffer = [0u8; 1024];
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
+
+    // validate remote response
+    match response {
+        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error {}", err)),
+        _ => {
+            debug!("remote response {:?}", response)
+        }
+    }
+
+    info!("Created remote stream to {:?}", remote);
+
+    Ok(())
+}
+
+pub async fn client_send_remote_start(send: &mut SendStream, remote: RemoteRequest) -> Result<()> {
+    let remote_start = "remote_start".as_bytes();
+    debug!("sending remote start to server");
+    send.write_all(remote_start).await?;
+
+    info!("Starting remote stream to {:?}", remote);
+
+    // TODO - maybe validate server "remoted started"
+    Ok(())
+}
+
+pub async fn server_recieve_remote_request(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<RemoteRequest> {
+    // Read remote request from Rusnel client
+    let mut buffer = [0; 1024];
+    let n = recv.read(&mut buffer).await?.unwrap();
+    let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
+
+    // TODO - add some kind of validation?
+
+    let response = RemoteResponse::RemoteOk;
+    verbose!("sending remote response to client {:?}", response);
+    send.write_all(response.to_json()?.as_bytes()).await?;
+    Ok(request)
+}
+
+// TODO - add support for multiple connections through tunnel
+// TODO - get the local TcpStream as a parameter for reuse of this function in socks
 pub async fn tunnel_tcp_client(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -27,13 +83,10 @@ pub async fn tunnel_tcp_client(
 
     // Asynchronously wait for an incoming connection
     let (socket, addr) = listener.accept().await?;
+    verbose!("new application connected to tunnel: {}", addr);
+    client_send_remote_start(&mut send, remote).await?;
+
     let (mut local_recv, mut local_send) = socket.into_split();
-
-    verbose!("new tunnel connection: {}", addr);
-
-    let remote_start = "remote_start".as_bytes();
-    debug!("sending remote start to server");
-    send.write_all(remote_start).await?;
 
     let client_to_server = tokio::io::copy(&mut local_recv, &mut send);
     let server_to_client = tokio::io::copy(&mut recv, &mut local_send);
@@ -171,118 +224,4 @@ pub async fn tunnel_udp_server(
     };
 
     Ok(())
-}
-
-
-pub async fn tunnel_socks_client(connection: Connection, mut send: SendStream, mut recv: RecvStream, remote: RemoteRequest) -> Result<()> {
-    let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
-    let listener = TcpListener::bind(&local_addr).await?;
-    println!("SOCKS5 proxy running on {}", &local_addr);
-
-    loop {
-        let (mut local_conn, local_addr) = listener.accept().await?;
-        let connection = connection.clone();
-        let remote = remote.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = socks_handshake(&mut local_conn).await {
-                eprintln!("Error handling client {}: {}", local_addr, e);
-            }
-
-            let addr = socks_handshake(&mut local_conn).await;
-            match addr {
-                Err(e) => eprintln!("Error handshaking with client {}: {}", local_addr, e),
-                Ok(str) => {
-                    tokio::spawn(async move {
-                        let (send, recv) = match connection.open_bi().await {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                eprintln!("Failed to open connection: {}", e);
-                                return
-                            }
-                        };
-                        start_client_dynamic_tunnel(send, recv, remote).await;
-                    });
-                    
-                }
-            }
-        });  
-    }
-    Ok(())
-}
-
-async fn start_client_dynamic_tunnel(send: SendStream, recv: RecvStream, remote: RemoteRequest) -> Result<()> {
-
-
-}
-
-async fn socks_handshake(conn: &mut TcpStream) -> Result<String> {
-    // Step 1: SOCKS5 handshake
-    let mut buf = [0u8; 256];
-    conn.read_exact(&mut buf[..2]).await?;
-
-    if buf[0] != 0x05 {
-        eprintln!("Unsupported SOCKS version: {}", buf[0]);
-        return Err(anyhow!("Unsupported SOCKS version: {}", buf[0]));
-    }
-
-    let methods_len = buf[1] as usize;
-    conn.read_exact(&mut buf[..methods_len]).await?;
-
-    // Only support "no authentication" (0x00)
-    conn.write_all(&[0x05, 0x00]).await?;
-
-    // Step 2: Read SOCKS5 request
-    conn.read_exact(&mut buf[..4]).await?;
-
-    if buf[1] != 0x01 {
-        eprintln!("Unsupported command: {}", buf[1]);
-        conn.write_all(&[0x05, 0x07]).await?; // Command not supported
-        return Err(anyhow!("Unsupported SOCKS command: {}", buf[1]));
-    }
-
-    // Step 3: Parse address and port
-    let addr = match buf[3] {
-        0x01 => {
-            // IPv4
-            let mut addr = [0u8; 4];
-            conn.read_exact(&mut addr).await?;
-            let mut port = [0u8; 2];
-            conn.read_exact(&mut port).await?;
-            let port = u16::from_be_bytes(port);
-            let remote_address = format!("{}.{}.{}.{}:{}", addr[0], addr[1], addr[2], addr[3], port);
-            info!(remote_address);
-            remote_address
-        }
-        0x03 => {
-            // Domain name
-            let mut len = [0u8; 1];
-            conn.read_exact(&mut len).await?;
-            let mut domain = vec![0u8; len[0] as usize];
-            conn.read_exact(&mut domain).await?;
-            let mut port = [0u8; 2];
-            conn.read_exact(&mut port).await?;
-            let port = u16::from_be_bytes(port);
-            let domain = String::from_utf8_lossy(&domain);
-            let remote_address = format!("{}:{}", domain, port);
-            info!(remote_address);
-            remote_address
-        }
-        _ => {
-            eprintln!("Unsupported address type: {}", buf[3]);
-            conn.write_all(&[0x05, 0x08]).await?; // Address type not supported
-            return Err(anyhow!("Unsupported address type: {}", buf[3]));
-        }
-    };
-
-    info!("Tunnening to target: {}", addr);
-
-    // Respond to the client with success
-    conn.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
-
-    Ok(addr)
-}
-
-pub async fn tunnel_socks_server(mut recv: RecvStream, mut send: SendStream, request: &RemoteRequest) -> Result<()> {
-
 }
