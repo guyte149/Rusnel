@@ -7,10 +7,10 @@ Rusnel is a high-performance tunneling tool built using Rust and leveraging the 
 - **QUIC Protocol Integration**: Utilizes the latest advancements in QUIC for fast and secure communication.
 - **Encryption**: Ensures all data transmitted through the tunnel is securely encrypted.
 - **Tunneling feagures:**
-    - ***TCP forward tunneling***
-    - ***TCP reverse tunneling***
-    - ***UDP forward tunneling***
-    - ***UDP reverse tunneling***
+    - ***TCP tunneling***
+    - ***UDP tunneling***
+    - ***reverse tunneling***
+    - ***socks tunneling***
 
 ## Installation
 Clone the repository and build the project:
