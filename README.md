@@ -27,10 +27,10 @@ cargo build --release
 ```
 
 ## TODO
-- [ v ] Rusnel never shuts down connection with remote (check) - still not closing in socks mode
+- [v] Rusnel never shuts down connection with remote (check)
 - [v] write better --help
 - [ ] write tests for tcp, udp, reverse and socks
-- [ ] add reverse sock5 tunneling support
+- [v] add reverse sock5 tunneling support
 - [v] add server --allow-reverse flag
 - [ ] improve logging by adding the connection and stream that the log is reffered to
 - [ ] client reconnect
