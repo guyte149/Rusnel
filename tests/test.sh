@@ -33,13 +33,12 @@ test_tcp_local_forward() {
 
   # 3) Start netcat listening on port 4000 (TCP)
   #    -N: close connection on EOF (if supported)
-  #    -q 1: quit 1s after EOF (useful if -N isn't available)
-  nc -lN 4000 > "$SERVER_OUT" 2>/dev/null &
+  nc -lp 4000 > "$SERVER_OUT" 2>/dev/null &
   local NC_SERVER_PID=$!
   wait_for_startup
 
   # 4) Send test message to port 3000
-  echo "$TEST_MSG" | nc 127.0.0.1 3000
+  echo "$TEST_MSG" | nc -N 127.0.0.1 3000
 
   # Give netcat a moment to capture output, if needed
   sleep 1
@@ -59,6 +58,7 @@ test_tcp_local_forward() {
   kill $NC_SERVER_PID || true
   kill $CLIENT_PID   || true
   kill $SERVER_PID   || true
+  rm $SERVER_OUT || true
   wait || true
 
   echo "[TEST] TCP Local Forward - PASSED"
@@ -72,8 +72,11 @@ test_tcp_local_forward() {
 test_tcp_reverse_forward() {
   echo "[TEST] TCP Reverse Forward (R:3000 -> 127.0.0.1:4000)"
 
+  local TEST_MSG="Hello from test_tcp_local_forward"
+  local SERVER_OUT="server_output.txt"
+
   # 1) Start tunnel server
-  cargo run server &
+  cargo run server --allow-reverse &
   SERVER_PID=$!
   wait_for_startup
 
@@ -83,17 +86,33 @@ test_tcp_reverse_forward() {
   wait_for_startup
 
   # 3) Start netcat on port 4000
-  nc -l 4000 &
-  NC_SERVER_PID=$!
+  #    -N: close connection on EOF (if supported)
+  nc -lp 4000 > "$SERVER_OUT" 2>/dev/null &
+  local NC_SERVER_PID=$!
   wait_for_startup
 
-  # 4) Connect to port 3000, send test data
-  echo "Hello from test_tcp_reverse_forward" | nc 127.0.0.1 3000
+  # 4) Send test message to port 3000
+  echo "$TEST_MSG" | nc -N 127.0.0.1 3000
+
+  # Give netcat a moment to capture output, if needed
+  sleep 1
+
+  # Validate that the server_output.txt file contains our message
+  if grep -q "$TEST_MSG" "$SERVER_OUT"; then
+    echo "[OK] Message received by server."
+  else
+    echo "[ERROR] Message not found in server_output.txt!"
+    kill $NC_SERVER_PID || true
+    kill $CLIENT_PID   || true
+    kill $SERVER_PID   || true
+    exit 1
+  fi
 
   # Clean up
   kill $NC_SERVER_PID || true
   kill $CLIENT_PID   || true
   kill $SERVER_PID   || true
+  rm $SERVER_OUT || true
   wait || true
 
   echo "[TEST] TCP Reverse Forward - PASSED"
@@ -214,7 +233,10 @@ echo "Starting Functional Tests..."
 test_tcp_local_forward
 test_tcp_reverse_forward
 test_udp_local_forward
-test_udp_reverse_forward
+pkill rusnel
+test_udp_reverse_forwar
+pkill rusnel
 test_socks_proxy
+pkill rusnel
 
 echo "All tests completed successfully."
