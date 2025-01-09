@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::task;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
@@ -40,7 +40,7 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 
     for task in tasks {
         if let Err(e) = task.await? {
-            eprintln!("Task failed: {}", e);
+            error!("Task failed: {}", e);
         }
     }
 

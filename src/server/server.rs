@@ -18,7 +18,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     // accept incoming clients
     while let Some(conn) = endpoint.accept().await {
         info!("client connected: {}", conn.remote_address());
-        let fut = handle_client_connection(conn);
+        let fut = handle_client_connection(conn, config.allow_reverse);
         tokio::spawn(async move {
             if let Err(e) = fut.await {
                 error!("connection failed: {reason}", reason = e.to_string())
@@ -28,7 +28,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
-async fn handle_client_connection(conn: quinn::Incoming) -> Result<()> {
+async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) -> Result<()> {
     let connection = conn.await?;
 
     // TODO: save the connection data to a struct (ClientInfo) and then use it in logs.
@@ -60,7 +60,7 @@ async fn handle_client_connection(conn: quinn::Incoming) -> Result<()> {
                 }
                 Ok(s) => s,
             };
-            let fut = handle_remote_stream(stream);
+            let fut = handle_remote_stream(stream, allow_reverse);
             tokio::spawn(async move {
                 if let Err(e) = fut.await {
                     error!("failed: {reason}", reason = e.to_string());
@@ -74,10 +74,11 @@ async fn handle_client_connection(conn: quinn::Incoming) -> Result<()> {
 
 async fn handle_remote_stream(
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+    allow_reverse: bool,
 ) -> Result<()> {
     verbose!("handling remote stream with client");
 
-    let request = server_recieve_remote_request(&mut send, &mut recv).await?;
+    let request = server_recieve_remote_request(&mut send, &mut recv, allow_reverse).await?;
 
     match request {
         // simple forward TCP

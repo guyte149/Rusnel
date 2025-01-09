@@ -11,6 +11,7 @@ pub mod server;
 pub struct ServerConfig {
     pub host: IpAddr,
     pub port: u16,
+    pub allow_reverse: bool
 }
 
 #[derive(Debug)]
