@@ -28,7 +28,7 @@ pub async fn client_send_remote_request(
 
     // validate remote response
     match response {
-        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error {}", err)),
+        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error: {}", err)),
         _ => {
             debug!("remote response {:?}", response)
         }
@@ -53,13 +53,19 @@ pub async fn client_send_remote_start(send: &mut SendStream, remote: RemoteReque
 pub async fn server_recieve_remote_request(
     send: &mut SendStream,
     recv: &mut RecvStream,
+    allow_reverse: bool,
 ) -> Result<RemoteRequest> {
     // Read remote request from Rusnel client
     let mut buffer = [0; 1024];
     let n = recv.read(&mut buffer).await?.unwrap();
     let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
 
-    // TODO - add some kind of validation?
+    if request.reversed && !allow_reverse {
+        let response = RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
+        verbose!("sending failed remote response to client {:?}", response);
+        send.write_all(response.to_json()?.as_bytes()).await?;
+        return Err(anyhow!("Reverse remotes are not allowed"));    
+    }
 
     let response = RemoteResponse::RemoteOk;
     verbose!("sending remote response to client {:?}", response);

@@ -81,7 +81,7 @@ impl RemoteRequest {
         let (local_host, local_port, remote_host, remote_port) = match address_parts.len() {
             1 => match address_parts[0] {
                 "socks" => (
-                    "0.0.0.0".parse::<IpAddr>().unwrap(),
+                    "127.0.0.1".parse::<IpAddr>().unwrap(),
                     1080,
                     String::from("socks"),
                     0,
@@ -104,7 +104,7 @@ impl RemoteRequest {
                         .parse::<u16>()
                         .map_err(|_| anyhow!("Invalid remote port"))?;
                     (
-                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        "127.0.0.1".parse::<IpAddr>().unwrap(),
                         local_port,
                         String::from("socks"),
                         0,

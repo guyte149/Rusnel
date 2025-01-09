@@ -29,6 +29,10 @@ enum Mode {
         #[arg(long, short, default_value_t = 8080)]
         port: u16,
 
+        // Allow clients to specify reverse port forwarding remotes.
+        #[arg(long, default_value_t = false)]
+        allow_reverse: bool,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -43,9 +47,42 @@ enum Mode {
         #[arg(value_parser)]
         server: String,
 
-        /// remotes
-        /// TODO add a lot of infomation
-        #[arg(name = "remote", required = true , value_delimiter = ' ', num_args = 1..)]
+        #[arg(name = "remote", required = true , value_delimiter = ' ', num_args = 1.., help=r#"
+<remote>s are remote connections tunneled through the server, each which come in the form:
+
+    <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
+
+    ■ local-host defaults to 0.0.0.0 (all interfaces).
+    ■ local-port defaults to remote-port.
+    ■ remote-port is required*.
+    ■ remote-host defaults to 0.0.0.0 (server localhost).
+    ■ protocol defaults to tcp.
+
+which shares <remote-host>:<remote-port> from the server to the client as <local-host>:<local-port>, or:
+
+    R:<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
+
+which does reverse port forwarding,
+sharing <remote-host>:<remote-port> from the client to the server's <local-host>:<local-port>.
+
+    example remotes
+
+        1337
+        example.com:1337
+        1337:google.com:80
+        192.168.1.14:5000:google.com:80
+        socks
+        5000:socks
+        R:2222:localhost:22
+        R:socks
+        R:5000:socks
+        1.1.1.1:53/udp
+    
+    When the Rusnel server has --allow-reverse enabled, remotes can be prefixed with R to denote that they are reversed.
+
+    Remotes can specify "socks" in place of remote-host and remote-port.
+    The default local host and port for a "socks" remote is 127.0.0.1:1080.
+        "#)]
         remotes: Vec<String>,
 
         /// enable verbose logging
@@ -69,12 +106,13 @@ fn main() {
         Mode::Server {
             host,
             port,
+            allow_reverse,
             is_verbose,
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
 
-            let server_config = ServerConfig { host, port };
+            let server_config = ServerConfig { host, port, allow_reverse };
             verbose!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         }
