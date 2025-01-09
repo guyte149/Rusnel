@@ -88,30 +88,34 @@ pub async fn tunnel_tcp_client(
 
     info!("listening on: {}", local_addr);
 
-    // Asynchronously wait for an incoming connection
-    let (socket, addr) = listener.accept().await?;
-    verbose!("new application connected to tunnel: {}", addr);
-    client_send_remote_start(&mut send, remote).await?;
-
-    let (mut local_recv, mut local_send) = socket.into_split();
-
-    let client_to_server = async {
-        tokio::io::copy(&mut local_recv, &mut send).await?;
-        send.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
-    };
-
-    let server_to_client = async {
-        tokio::io::copy(&mut recv, &mut local_send).await?;
-        local_send.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
-    };
-
-    match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => verbose!("Finished tcp tunnel"),
-        Err(e) => eprintln!("Failed to forward: {}", e),
-    };
-
+    loop {
+        // Asynchronously wait for an incoming connection
+        let (socket, addr) = listener.accept().await?;
+        verbose!("new application connected to tunnel: {}", addr);
+        tokio::spawn(async move {
+            client_send_remote_start(&mut send, remote).await?;
+    
+            let (mut local_recv, mut local_send) = socket.into_split();
+    
+            let client_to_server = async {
+                tokio::io::copy(&mut local_recv, &mut send).await?;
+                send.shutdown().await?;
+                Ok::<(), anyhow::Error>(())
+            };
+    
+            let server_to_client = async {
+                tokio::io::copy(&mut recv, &mut local_send).await?;
+                local_send.shutdown().await?;
+                Ok::<(), anyhow::Error>(())
+            };
+    
+            match tokio::try_join!(client_to_server, server_to_client) {
+                Ok(_) => verbose!("Finished tcp tunnel"),
+                Err(e) => eprintln!("Failed to forward: {}", e),
+            };
+            Ok::<(), anyhow::Error>(())
+        });
+    }
     Ok(())
 }
 
