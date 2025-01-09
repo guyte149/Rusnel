@@ -29,7 +29,7 @@ enum Mode {
         #[arg(long, short, default_value_t = 8080)]
         port: u16,
 
-        // Allow clients to specify reverse port forwarding remotes.
+        /// Allow clients to specify reverse port forwarding remotes.
         #[arg(long, default_value_t = false)]
         allow_reverse: bool,
 
