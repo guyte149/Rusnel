@@ -1,9 +1,11 @@
 use anyhow::Result;
 
+use quinn::Connection;
 use tracing::{error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
+use crate::common::socks::tunnel_socks_client;
 use crate::common::tunnel::{
     server_recieve_remote_request, tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client,
     tunnel_udp_server,
@@ -46,7 +48,8 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
     async {
         // Each stream initiated by the client constitutes a new remote request.
         loop {
-            let stream = connection.accept_bi().await;
+            let quic_connection = connection.clone();
+            let stream = quic_connection.accept_bi().await;
             info!("new stream accepted");
 
             let stream = match stream {
@@ -60,7 +63,7 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
                 }
                 Ok(s) => s,
             };
-            let fut = handle_remote_stream(stream, allow_reverse);
+            let fut = handle_remote_stream(quic_connection, stream, allow_reverse);
             tokio::spawn(async move {
                 if let Err(e) = fut.await {
                     error!("failed: {reason}", reason = e.to_string());
@@ -73,6 +76,7 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
 }
 
 async fn handle_remote_stream(
+    quic_connection: Connection,
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     allow_reverse: bool,
 ) -> Result<()> {
@@ -81,6 +85,18 @@ async fn handle_remote_stream(
     let request = server_recieve_remote_request(&mut send, &mut recv, allow_reverse).await?;
 
     match request {
+        // reverse socks
+        RemoteRequest {
+            local_host: _,
+            local_port: _,
+            remote_host: ref remote_host_ref,
+            remote_port: 0,
+            reversed: true,
+            protocol: Protocol::Tcp,
+        } if remote_host_ref == "socks" => {
+            tunnel_socks_client(quic_connection, request).await?;
+        }
+
         // simple forward TCP
         RemoteRequest {
             local_host: _,
@@ -127,8 +143,7 @@ async fn handle_remote_stream(
             protocol: Protocol::Udp,
         } => {
             tunnel_udp_client(send, recv, request).await?;
-        } // reverse socks5
-          // TODO
+        }
     }
 
     Ok(())

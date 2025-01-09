@@ -67,14 +67,20 @@ async fn start_client_dynamic_tunnel(
 
     let (mut local_recv, mut local_send) = socks_conn.into_split();
 
-    let client_to_server = tokio::io::copy(&mut local_recv, &mut send);
-    let server_to_client = tokio::io::copy(&mut recv, &mut local_send);
+    let client_to_server = async {
+        tokio::io::copy(&mut local_recv, &mut send).await?;
+        send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let server_to_client = async {
+        tokio::io::copy(&mut recv, &mut local_send).await?;
+        local_send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
 
     match tokio::try_join!(client_to_server, server_to_client) {
-        Ok((ctos, stoc)) => println!(
-            "Forwarded {} bytes from client to server and {} bytes from server to client",
-            ctos, stoc
-        ),
+        Ok(_) => verbose!("Finished forwarding dynamic tunnel"),
         Err(e) => eprintln!("Failed to forward: {}", e),
     };
 
