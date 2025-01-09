@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use quinn::{RecvStream, SendStream};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info};
 
@@ -94,14 +95,20 @@ pub async fn tunnel_tcp_client(
 
     let (mut local_recv, mut local_send) = socket.into_split();
 
-    let client_to_server = tokio::io::copy(&mut local_recv, &mut send);
-    let server_to_client = tokio::io::copy(&mut recv, &mut local_send);
+    let client_to_server = async {
+        tokio::io::copy(&mut local_recv, &mut send).await?;
+        send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let server_to_client = async {
+        tokio::io::copy(&mut recv, &mut local_send).await?;
+        local_send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
 
     match tokio::try_join!(client_to_server, server_to_client) {
-        Ok((ctos, stoc)) => println!(
-            "Forwarded {} bytes from client to server and {} bytes from server to client",
-            ctos, stoc
-        ),
+        Ok(_) => verbose!("Finished tcp tunnel"),
         Err(e) => eprintln!("Failed to forward: {}", e),
     };
 
@@ -127,14 +134,20 @@ pub async fn tunnel_tcp_server(
 
     let (mut remote_recv, mut remote_send) = stream.into_split();
 
-    let server_to_remote = tokio::io::copy(&mut recv, &mut remote_send);
-    let remote_to_server = tokio::io::copy(&mut remote_recv, &mut send);
+    let server_to_remote = async {
+        tokio::io::copy(&mut recv, &mut remote_send).await?;
+        remote_send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let remote_to_server = async {
+        tokio::io::copy(&mut remote_recv, &mut send).await?;
+        send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
 
     match tokio::try_join!(server_to_remote, remote_to_server) {
-        Ok((ctos, stoc)) => println!(
-            "Forwarded {} bytes from client to server and {} bytes from server to client",
-            ctos, stoc
-        ),
+        Ok(_) => verbose!("Finished tcp tunnel"),
         Err(e) => eprintln!("Failed to forward: {}", e),
     };
 
