@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use quinn::{RecvStream, SendStream};
+use quinn::{Connection, RecvStream, SendStream};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info};
@@ -62,10 +62,11 @@ pub async fn server_recieve_remote_request(
     let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
 
     if request.reversed && !allow_reverse {
-        let response = RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
+        let response =
+            RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
         verbose!("sending failed remote response to client {:?}", response);
         send.write_all(response.to_json()?.as_bytes()).await?;
-        return Err(anyhow!("Reverse remotes are not allowed"));    
+        return Err(anyhow!("Reverse remotes are not allowed"));
     }
 
     let response = RemoteResponse::RemoteOk;
@@ -74,41 +75,41 @@ pub async fn server_recieve_remote_request(
     Ok(request)
 }
 
-// TODO - add support for multiple connections through tunnel
 // TODO - get the local TcpStream as a parameter for reuse of this function in socks
-pub async fn tunnel_tcp_client(
-    mut send: SendStream,
-    mut recv: RecvStream,
-    remote: RemoteRequest,
-) -> Result<()> {
+pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
     // Listen for incoming connections
-    // TODO - run this in loop, to support multiple clients connecting through tunnel
     let listener = TcpListener::bind(&local_addr).await?;
-
     info!("listening on: {}", local_addr);
 
     loop {
         // Asynchronously wait for an incoming connection
-        let (socket, addr) = listener.accept().await?;
+        let (local_socket, addr) = listener.accept().await?;
         verbose!("new application connected to tunnel: {}", addr);
+
+        let connection = quic_connection.clone();
+        let remote = remote.clone();
+
         tokio::spawn(async move {
+            let (mut send, mut recv) = connection.open_bi().await?;
+
+            client_send_remote_request(&remote, &mut send, &mut recv).await?;
             client_send_remote_start(&mut send, remote).await?;
-    
-            let (mut local_recv, mut local_send) = socket.into_split();
-    
+
+            let (mut local_recv, mut local_send) = local_socket.into_split();
+
             let client_to_server = async {
                 tokio::io::copy(&mut local_recv, &mut send).await?;
                 send.shutdown().await?;
                 Ok::<(), anyhow::Error>(())
             };
-    
+
             let server_to_client = async {
                 tokio::io::copy(&mut recv, &mut local_send).await?;
                 local_send.shutdown().await?;
                 Ok::<(), anyhow::Error>(())
             };
-    
+
             match tokio::try_join!(client_to_server, server_to_client) {
                 Ok(_) => verbose!("Finished tcp tunnel"),
                 Err(e) => eprintln!("Failed to forward: {}", e),
@@ -116,10 +117,8 @@ pub async fn tunnel_tcp_client(
             Ok::<(), anyhow::Error>(())
         });
     }
-    Ok(())
 }
 
-// TODO - add support for multiple connections throuth tunnel
 pub async fn tunnel_tcp_server(
     mut recv: RecvStream,
     mut send: SendStream,
@@ -158,12 +157,8 @@ pub async fn tunnel_tcp_server(
     Ok(())
 }
 
-// TODO - add support for multiple connections throuth tunnel
-pub async fn tunnel_udp_client(
-    mut send: SendStream,
-    mut recv: RecvStream,
-    remote: RemoteRequest,
-) -> Result<()> {
+// TODO - add support for multiple connections throuth tunnel - currently support only one connection
+pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let listener = Arc::new(UdpSocket::bind(&listen_addr).await?);
 
@@ -172,10 +167,13 @@ pub async fn tunnel_udp_client(
 
     info!("listening on UDP: {}", listen_addr);
 
+    let (mut send, mut recv) = quic_connection.open_bi().await?;
+    client_send_remote_request(&remote, &mut send, &mut recv).await?;
+
     let mut buffer = [0u8; 1024];
     let (n, local_conn_addr) = local_recv.recv_from(&mut buffer).await?;
 
-    verbose!("received UDP packet from: {}", local_conn_addr);
+    verbose!("received UDP connection from: {}", local_conn_addr);
 
     send.write_all(&buffer[..n]).await?;
 
@@ -207,7 +205,7 @@ pub async fn tunnel_udp_client(
     Ok(())
 }
 
-// TODO - add support for multiple connections throuth tunnel
+// TODO - add support for multiple connections throuth tunnel - currently suppurt one connection
 pub async fn tunnel_udp_server(
     mut recv: RecvStream,
     mut send: SendStream,
