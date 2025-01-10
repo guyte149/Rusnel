@@ -142,7 +142,7 @@ async fn handle_remote_stream(
             reversed: true,
             protocol: Protocol::Udp,
         } => {
-            tunnel_udp_client(quic_connection,request).await?;
+            tunnel_udp_client(quic_connection, request).await?;
         }
     }
 

@@ -112,7 +112,11 @@ fn main() {
         } => {
             set_log_level(is_verbose, is_debug);
 
-            let server_config = ServerConfig { host, port, allow_reverse };
+            let server_config = ServerConfig {
+                host,
+                port,
+                allow_reverse,
+            };
             verbose!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         }
