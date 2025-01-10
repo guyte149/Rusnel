@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tracing::{error, info};
 
 use crate::common::remote;
 use crate::verbose;
@@ -14,7 +15,7 @@ use anyhow::{anyhow, Result};
 pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let listener = TcpListener::bind(&local_addr).await?;
-    println!("SOCKS5 proxy running on {}", &local_addr);
+    info!("SOCKS5 proxy running on {}", &local_addr);
 
     loop {
         let (mut local_conn, local_addr) = listener.accept().await?;
@@ -22,15 +23,15 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
         let remote = remote.clone();
 
         tokio::spawn(async move {
-            let addr = socks_handshake(&mut local_conn, &remote).await;
-            match addr {
-                Err(e) => eprintln!("Error handshaking with client {}: {}", local_addr, e),
+            let dynamic_remote = socks_handshake(&mut local_conn, &remote).await;
+            match dynamic_remote {
+                Err(e) => error!("Error handshaking with client {}: {}", local_addr, e),
                 Ok(dynamic_remote) => {
                     tokio::spawn(async move {
                         let (send, recv) = match connection.open_bi().await {
                             Ok(stream) => stream,
                             Err(e) => {
-                                eprintln!("Failed to open bi connection: {}", e);
+                                error!("Failed to open bi connection: {}", e);
                                 return;
                                 // return Err(anyhow!("Failed to open bi connection: {}", e))
                             }
@@ -40,7 +41,7 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
                         {
                             Ok(()) => (),
                             Err(e) => {
-                                eprintln!("Failed to start dynamic remote: {}", e);
+                                error!("Failed to start dynamic remote: {}", e);
                             }
                         };
                     });
@@ -67,14 +68,20 @@ async fn start_client_dynamic_tunnel(
 
     let (mut local_recv, mut local_send) = socks_conn.into_split();
 
-    let client_to_server = tokio::io::copy(&mut local_recv, &mut send);
-    let server_to_client = tokio::io::copy(&mut recv, &mut local_send);
+    let client_to_server = async {
+        tokio::io::copy(&mut local_recv, &mut send).await?;
+        send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let server_to_client = async {
+        tokio::io::copy(&mut recv, &mut local_send).await?;
+        local_send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
 
     match tokio::try_join!(client_to_server, server_to_client) {
-        Ok((ctos, stoc)) => println!(
-            "Forwarded {} bytes from client to server and {} bytes from server to client",
-            ctos, stoc
-        ),
+        Ok(_) => verbose!("Finished forwarding dynamic tunnel"),
         Err(e) => eprintln!("Failed to forward: {}", e),
     };
 
