@@ -16,6 +16,12 @@ Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC proto
 
 
 ## Install
+```bash
+cargo install rusnel
+```
+
+### or
+
 Clone the repository and build the project:
 ```bash
 git clone https://github.com/guyte149/Rusnel.git
@@ -41,7 +47,7 @@ Options:
 ```
 
 ```bash
-$ target/debug/rusnel server --help
+$ rusnel server --help
 run Rusnel in server mode
 
 Usage: rusnel server [OPTIONS]
