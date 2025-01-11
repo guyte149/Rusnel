@@ -5,8 +5,8 @@ use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
+use std::str::FromStr;
 use tracing::debug;
-use tracing_subscriber;
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
@@ -112,7 +112,11 @@ fn main() {
         } => {
             set_log_level(is_verbose, is_debug);
 
-            let server_config = ServerConfig { host, port, allow_reverse };
+            let server_config = ServerConfig {
+                host,
+                port,
+                allow_reverse,
+            };
             verbose!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         }
@@ -125,13 +129,13 @@ fn main() {
             set_log_level(is_verbose, is_debug);
             let server_addr = server
                 .to_socket_addrs()
-                .expect(&format!("Failed to resolve server address: {server}"))
+                .unwrap_or_else(|_| panic!("Failed to resolve server address: {server}"))
                 .next()
                 .unwrap();
 
             let mut remotes_list: Vec<RemoteRequest> = vec![];
             for remote_str in remotes {
-                let remote = RemoteRequest::from_str(remote_str).unwrap_or_else(|error| {
+                let remote = RemoteRequest::from_str(&remote_str).unwrap_or_else(|error| {
                     eprintln!("Remote parsing error: {}", error);
                     process::exit(1);
                 });

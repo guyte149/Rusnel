@@ -14,4 +14,3 @@ macro_rules! verbose {
 pub fn set_verbose(is_verbose: bool) {
     VERBOSE.store(is_verbose, Ordering::Relaxed);
 }
-

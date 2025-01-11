@@ -1,7 +1,7 @@
 use crate::common::utils::SerdeHelper;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::{net::IpAddr, str::FromStr};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Protocol {
@@ -39,8 +39,10 @@ impl RemoteRequest {
     }
 }
 
-impl RemoteRequest {
-    pub fn from_str(remote_str: String) -> Result<RemoteRequest> {
+impl FromStr for RemoteRequest {
+    type Err = anyhow::Error;
+
+    fn from_str(remote_str: &str) -> Result<RemoteRequest> {
         // remote_str can be in various formats, including:
         // <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
         // <remote-host>:<remote-port>
@@ -68,9 +70,9 @@ impl RemoteRequest {
         }
 
         if parts.len() > 1 {
-            match parts.last().unwrap() {
-                &"tcp" => protocol = Protocol::Tcp,
-                &"udp" => protocol = Protocol::Udp,
+            match *parts.last().unwrap() {
+                "tcp" => protocol = Protocol::Tcp,
+                "udp" => protocol = Protocol::Udp,
                 _ => return Err(anyhow!("Invalid protocol: Must be 'tcp' or 'udp'")),
             }
         }
