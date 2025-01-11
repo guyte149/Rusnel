@@ -13,7 +13,7 @@ use crate::{verbose, ServerConfig};
 
 #[tokio::main]
 pub async fn run(config: ServerConfig) -> Result<()> {
-    let endpoint = create_server_endpoint(config.host, config.port)?;
+    let endpoint = create_server_endpoint(config.host, config.port, config.tls_key, config.tls_cert)?;
     info!("listening on {}", endpoint.local_addr()?);
 
     // accept incoming clients

@@ -14,7 +14,7 @@ use crate::ClientConfig;
 
 #[tokio::main]
 pub async fn run(config: ClientConfig) -> Result<()> {
-    let endpoint = create_client_endpoint()?;
+    let endpoint = create_client_endpoint(config.tls_skip_verify)?;
 
     info!("connecting to server at: {}", config.server);
     let connection = endpoint.connect(config.server, "localhost")?.await?;

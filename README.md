@@ -41,7 +41,7 @@ Options:
 ```
 
 ```bash
-$ target/debug/rusnel server --help
+$ rusnel server --help
 run Rusnel in server mode
 
 Usage: rusnel server [OPTIONS]
@@ -79,7 +79,7 @@ Arguments:
                    R:<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
 
                which does reverse port forwarding,
-               sharing <remote-host>:<remote-port> from the client to the server's <local-host>:<local-port>.
+               sharing <remote-host>:<remote-port> from the client to the server\'s <local-host>:<local-port>.
 
                    example remotes
 

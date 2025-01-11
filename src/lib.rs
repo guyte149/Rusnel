@@ -12,12 +12,15 @@ pub struct ServerConfig {
     pub host: IpAddr,
     pub port: u16,
     pub allow_reverse: bool,
+    pub tls_key: String,
+    pub tls_cert: String
 }
 
 #[derive(Debug)]
 pub struct ClientConfig {
     pub server: SocketAddr,
     pub remotes: Vec<RemoteRequest>,
+    pub tls_skip_verify: bool,
 }
 
 pub fn run_server(config: ServerConfig) {

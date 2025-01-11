@@ -8,7 +8,7 @@ use std::process;
 use std::str::FromStr;
 use tracing::debug;
 
-/// Rusnel is a fast tcp/udp multiplexed tunnel.
+/// Rusnel is a fast tcp/udp multiplexed tunnel over QUIC.
 #[derive(Parser)]
 #[command(name = "Rusnel", version = crate_version!())]
 #[command(about = "A fast tcp/udp tunnel", long_about = None)]
@@ -32,6 +32,14 @@ enum Mode {
         /// Allow clients to specify reverse port forwarding remotes.
         #[arg(long, default_value_t = false)]
         allow_reverse: bool,
+
+        /// provides optional path to a PEM-encoded TLS private key. When this flag is set, you must also set --tls-cert
+        #[arg(long, default_value_t = String::from(""))]
+        tls_key: String,
+        
+        /// optional path to a PEM-encoded TLS certificate. When this flag is set, you must also set --tls-key
+        #[arg(long, default_value_t = String::from(""))]
+        tls_cert: String,
 
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
@@ -63,7 +71,7 @@ which shares <remote-host>:<remote-port> from the server to the client as <local
     R:<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
 
 which does reverse port forwarding,
-sharing <remote-host>:<remote-port> from the client to the server's <local-host>:<local-port>.
+sharing <remote-host>:<remote-port> from the client to the server\'s <local-host>:<local-port>.
 
     example remotes
 
@@ -84,6 +92,10 @@ sharing <remote-host>:<remote-port> from the client to the server's <local-host>
     The default local host and port for a "socks" remote is 127.0.0.1:1080.
         "#)]
         remotes: Vec<String>,
+
+        /// Skip server TLS certificate verification. If set, client accepts any TLS certificate presented by the server.
+        #[arg(long, default_value_t = false)]
+        tls_skip_verify: bool,
 
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
@@ -107,6 +119,8 @@ fn main() {
             host,
             port,
             allow_reverse,
+            tls_key,
+            tls_cert,
             is_verbose,
             is_debug,
         } => {
@@ -116,6 +130,8 @@ fn main() {
                 host,
                 port,
                 allow_reverse,
+                tls_key,
+                tls_cert
             };
             verbose!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
@@ -123,6 +139,7 @@ fn main() {
         Mode::Client {
             server,
             remotes,
+            tls_skip_verify,
             is_verbose,
             is_debug,
         } => {
@@ -145,6 +162,7 @@ fn main() {
             let client_config = ClientConfig {
                 server: server_addr,
                 remotes: remotes_list,
+                tls_skip_verify: tls_skip_verify,
             };
             verbose!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
