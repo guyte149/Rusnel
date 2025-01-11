@@ -9,6 +9,7 @@ use crate::common::remote;
 use crate::verbose;
 
 use super::remote::RemoteRequest;
+use super::tcp::tunnel_tcp_stream;
 use super::tunnel::{client_send_remote_request, client_send_remote_start};
 use anyhow::{anyhow, Result};
 
@@ -54,41 +55,25 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
 
 async fn start_client_dynamic_tunnel(
     mut socks_conn: TcpStream,
-    mut send: SendStream,
-    mut recv: RecvStream,
+    mut send_channel: SendStream,
+    mut recv_channel: RecvStream,
     dynamic_remote: RemoteRequest,
 ) -> Result<()> {
-    client_send_remote_request(&dynamic_remote, &mut send, &mut recv).await?;
-    client_send_remote_start(&mut send, dynamic_remote).await?;
+    client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
+    client_send_remote_start(&mut send_channel, dynamic_remote).await?;
 
     // Respond to the application with success
     socks_conn
         .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
 
-    let (mut local_recv, mut local_send) = socks_conn.into_split();
-
-    let client_to_server = async {
-        tokio::io::copy(&mut local_recv, &mut send).await?;
-        send.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
-    };
-
-    let server_to_client = async {
-        tokio::io::copy(&mut recv, &mut local_send).await?;
-        local_send.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
-    };
-
-    match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => verbose!("Finished forwarding dynamic tunnel"),
-        Err(e) => eprintln!("Failed to forward: {}", e),
-    };
+    tunnel_tcp_stream(socks_conn, send_channel, recv_channel).await?;
 
     Ok(())
 }
 
-// perfomrs socks handshake with application and returns a new dynamic remote
+// TODO - support udp over socks5 :)
+/// perfomrs socks handshake with application and returns a new dynamic remote request
 async fn socks_handshake(
     conn: &mut TcpStream,
     original_remote: &RemoteRequest,

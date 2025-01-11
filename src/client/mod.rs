@@ -7,10 +7,9 @@ use tracing::{debug, error, info};
 use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
-use crate::common::tunnel::{
-    client_send_remote_request, server_recieve_remote_request, tunnel_tcp_client,
-    tunnel_tcp_server, tunnel_udp_client, tunnel_udp_server,
-};
+use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
+use crate::common::tunnel::{client_send_remote_request, server_recieve_remote_request};
+use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::ClientConfig;
 
 #[tokio::main]
@@ -95,7 +94,7 @@ async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest
             protocol: _,
         } => {
             let (mut send, mut recv) = quic_connection.open_bi().await?;
-            client_send_remote_request(&remote, &mut send, &mut recv).await?; // send remote request
+            client_send_remote_request(&remote, &mut send, &mut recv).await?;
             send.shutdown().await? // finish - the main loop will get a dynamic remote connection
         }
     }

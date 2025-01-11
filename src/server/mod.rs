@@ -6,10 +6,9 @@ use tracing::{error, info, info_span};
 use crate::common::quic::create_server_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
-use crate::common::tunnel::{
-    server_recieve_remote_request, tunnel_tcp_client, tunnel_tcp_server, tunnel_udp_client,
-    tunnel_udp_server,
-};
+use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
+use crate::common::tunnel::server_recieve_remote_request;
+use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{verbose, ServerConfig};
 
 #[tokio::main]
