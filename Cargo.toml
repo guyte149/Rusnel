@@ -1,5 +1,6 @@
 [package]
 name = "rusnel"
+description = "Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC protocol. Single executable including both client and server"
 version = "0.1.0"
 authors = ["<guyte149@gmail.com>"]
 edition = "2021"
