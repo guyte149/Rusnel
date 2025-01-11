@@ -1,13 +1,13 @@
 # Rusnel
 
 ## Description
-Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC protocol. Single executable including both client and server. Written in Rust!.
-Rusnel is mainly useful for passing through firewalls, though it can also be used to provide a secure endpoint into your network.
+Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC protocol. Single executable including both client and server. Written in Rust.
+
 
 ## Features
 -   Easy to use
 -   Single executable including both client and server.
--   Utilizes the latest advancements in QUIC for fast and multiplexed communication.
+-   Uses QUIC protocol for fast and multiplexed communication.
 -   Encrypted connections using the QUIC protocol (Tls1.3)
 -   Clients can create multiple tunnel endpoints over one TCP connection
 -   Reverse port forwarding (Connections go through the server and out the client)
@@ -79,7 +79,7 @@ Arguments:
                    R:<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
 
                which does reverse port forwarding,
-               sharing <remote-host>:<remote-port> from the client to the server's <local-host>:<local-port>.
+               sharing <remote-host>:<remote-port> from the client to the server\'s <local-host>:<local-port>.
 
                    example remotes
 
@@ -111,7 +111,7 @@ Options:
 - [ ] improve logging by adding the connection and stream that the log is reffered to
 - [ ] client reconnect
 - [ ] add proxy support for client (client connects to server through a proxy)
-- [ ] generate a hardcoded key and CA every compliation
-- [ ] add mtls authentication
+- [ ] add server tls certificate verificatin
+- [ ] add mutual tls verification
 - [ ] add fake-beckend http/3 feature to server
 
