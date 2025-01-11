@@ -2,6 +2,13 @@
 name = "rusnel"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/guyte149/Rusnel"
+documentation = "https://docs.rs/rusnel"
+homepage = "https://github.com/guyte149/Rusnel"
+readme = "README.md"
+keywords = ["tunnel", "socks", "quic", "rusnel"]
+categories = ["tunneling-tool"]
 
 [dependencies]
 clap = { version = "4.5.9", features = ["derive", "color", "suggestions", "cargo"] }
