@@ -63,7 +63,7 @@ which shares <remote-host>:<remote-port> from the server to the client as <local
     R:<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
 
 which does reverse port forwarding,
-sharing <remote-host>:<remote-port> from the client to the server's <local-host>:<local-port>.
+sharing <remote-host>:<remote-port> from the client to the server\'s <local-host>:<local-port>.
 
     example remotes
 
