@@ -1,36 +1,44 @@
 use anyhow::Result;
 use quinn::{Connection, RecvStream, SendStream};
-use tokio::{io::AsyncWriteExt, net::{TcpListener, TcpStream}};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+};
 use tracing::info;
 
 use crate::{
-    common::tunnel::{client_send_remote_request, client_send_remote_start, server_receive_remote_start},
+    common::tunnel::{
+        client_send_remote_request, client_send_remote_start, server_receive_remote_start,
+    },
     verbose,
 };
 
 use super::remote::RemoteRequest;
 
-pub async fn tunnel_tcp_stream(tcp_stream: TcpStream, mut send_channel: SendStream, mut recv_channel: RecvStream) -> Result<()> {
-        let (mut tcp_recv, mut tcp_send) = tcp_stream.into_split();
+pub async fn tunnel_tcp_stream(
+    tcp_stream: TcpStream,
+    mut send_channel: SendStream,
+    mut recv_channel: RecvStream,
+) -> Result<()> {
+    let (mut tcp_recv, mut tcp_send) = tcp_stream.into_split();
 
-        let client_to_server = async {
-            tokio::io::copy(&mut tcp_recv, &mut send_channel).await?;
-            send_channel.shutdown().await?;
-            Ok::<(), anyhow::Error>(())
-        };
-
-        let server_to_client = async {
-            tokio::io::copy(&mut recv_channel, &mut tcp_send).await?;
-            tcp_send.shutdown().await?;
-            Ok::<(), anyhow::Error>(())
-        };
-
-        match tokio::try_join!(client_to_server, server_to_client) {
-            Ok(_) => verbose!("Finished tcp tunnel"),
-            Err(e) => eprintln!("Failed to forward: {}", e),
-        };
+    let client_to_server = async {
+        tokio::io::copy(&mut tcp_recv, &mut send_channel).await?;
+        send_channel.shutdown().await?;
         Ok::<(), anyhow::Error>(())
-    
+    };
+
+    let server_to_client = async {
+        tokio::io::copy(&mut recv_channel, &mut tcp_send).await?;
+        tcp_send.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    match tokio::try_join!(client_to_server, server_to_client) {
+        Ok(_) => verbose!("Finished tcp tunnel"),
+        Err(e) => eprintln!("Failed to forward: {}", e),
+    };
+    Ok::<(), anyhow::Error>(())
 }
 
 pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
@@ -57,7 +65,6 @@ pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteReques
     }
 }
 
-
 pub async fn tunnel_tcp_server(
     mut recv_channel: RecvStream,
     send_channel: SendStream,
@@ -74,4 +81,3 @@ pub async fn tunnel_tcp_server(
 
     Ok(())
 }
-

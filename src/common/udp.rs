@@ -2,17 +2,20 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use quinn::{Connection, RecvStream, SendStream};
-use tokio::net::UdpSocket;
 use std::net::SocketAddr;
+use tokio::net::UdpSocket;
 use tracing::info;
 
 use crate::{common::tunnel::client_send_remote_request, verbose};
 
 use super::remote::RemoteRequest;
 
-
-pub async fn tunnel_udp_stream(udp_socket: Arc<UdpSocket>, udp_address: SocketAddr, mut send_channel: SendStream, mut recv_channel: RecvStream) -> Result<()> {
-
+pub async fn tunnel_udp_stream(
+    udp_socket: Arc<UdpSocket>,
+    udp_address: SocketAddr,
+    mut send_channel: SendStream,
+    mut recv_channel: RecvStream,
+) -> Result<()> {
     let client_to_server = async {
         let mut buf = vec![0u8; 1024];
         loop {
@@ -41,9 +44,7 @@ pub async fn tunnel_udp_stream(udp_socket: Arc<UdpSocket>, udp_address: SocketAd
         Err(e) => eprintln!("Failed to forward: {}", e),
     };
     Ok::<(), anyhow::Error>(())
-
 }
-
 
 pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
@@ -71,8 +72,8 @@ pub async fn tunnel_udp_server(
     request: RemoteRequest,
 ) -> Result<()> {
     let remote_addr: SocketAddr = format!("{}:{}", request.remote_host, request.remote_port)
-    .parse()
-    .context("Failed to parse remote address")?;
+        .parse()
+        .context("Failed to parse remote address")?;
 
     let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 

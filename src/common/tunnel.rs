@@ -36,7 +36,6 @@ pub async fn client_send_remote_request(
     Ok(())
 }
 
-
 pub async fn server_recieve_remote_request(
     send_channel: &mut SendStream,
     recv_channel: &mut RecvStream,
@@ -46,22 +45,29 @@ pub async fn server_recieve_remote_request(
     let mut buffer = [0; 1024];
     let n = recv_channel.read(&mut buffer).await?.unwrap();
     let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
-    
+
     if request.reversed && !allow_reverse {
         let response =
-        RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
+            RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
         verbose!("sending failed remote response to client {:?}", response);
-        send_channel.write_all(response.to_json()?.as_bytes()).await?;
+        send_channel
+            .write_all(response.to_json()?.as_bytes())
+            .await?;
         return Err(anyhow!("Reverse remotes are not allowed"));
     }
-    
+
     let response = RemoteResponse::RemoteOk;
     verbose!("sending remote response to client {:?}", response);
-    send_channel.write_all(response.to_json()?.as_bytes()).await?;
+    send_channel
+        .write_all(response.to_json()?.as_bytes())
+        .await?;
     Ok(request)
 }
 
-pub async fn client_send_remote_start(send_channel: &mut SendStream, remote: RemoteRequest) -> Result<()> {
+pub async fn client_send_remote_start(
+    send_channel: &mut SendStream,
+    remote: RemoteRequest,
+) -> Result<()> {
     let remote_start = "remote_start".as_bytes();
     debug!("sending remote start to server");
     send_channel.write_all(remote_start).await?;
