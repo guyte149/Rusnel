@@ -5,6 +5,7 @@ use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
+use std::str::FromStr;
 use tracing::debug;
 use tracing_subscriber;
 
@@ -135,7 +136,7 @@ fn main() {
 
             let mut remotes_list: Vec<RemoteRequest> = vec![];
             for remote_str in remotes {
-                let remote = RemoteRequest::from_str(remote_str).unwrap_or_else(|error| {
+                let remote = RemoteRequest::from_str(&remote_str).unwrap_or_else(|error| {
                     eprintln!("Remote parsing error: {}", error);
                     process::exit(1);
                 });

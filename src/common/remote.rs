@@ -1,7 +1,7 @@
 use crate::common::utils::SerdeHelper;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::{error::Error, net::IpAddr, str::FromStr};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Protocol {
@@ -39,8 +39,10 @@ impl RemoteRequest {
     }
 }
 
-impl RemoteRequest {
-    pub fn from_str(remote_str: String) -> Result<RemoteRequest> {
+impl FromStr for RemoteRequest{
+    type Err = anyhow::Error;
+
+    fn from_str(remote_str: &str) -> Result<RemoteRequest> {
         // remote_str can be in various formats, including:
         // <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
         // <remote-host>:<remote-port>
