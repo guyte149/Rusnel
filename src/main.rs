@@ -7,7 +7,6 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
 use std::str::FromStr;
 use tracing::debug;
-use tracing_subscriber;
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
@@ -130,7 +129,7 @@ fn main() {
             set_log_level(is_verbose, is_debug);
             let server_addr = server
                 .to_socket_addrs()
-                .expect(&format!("Failed to resolve server address: {server}"))
+                .unwrap_or_else(|_| panic!("Failed to resolve server address: {server}"))
                 .next()
                 .unwrap();
 

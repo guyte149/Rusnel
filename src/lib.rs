@@ -22,7 +22,7 @@ pub struct ClientConfig {
 
 pub fn run_server(config: ServerConfig) {
     info!("running server");
-    match server::server::run(config) {
+    match server::run(config) {
         Ok(_) => {}
         Err(e) => {
             error!("an error occurred: {}", e)
@@ -32,7 +32,7 @@ pub fn run_server(config: ServerConfig) {
 
 pub fn run_client(config: ClientConfig) {
     info!("running client");
-    match client::client::run(config) {
+    match client::run(config) {
         Ok(_) => {}
         Err(e) => {
             error!("an error occured: {}", e)

@@ -157,7 +157,7 @@ pub async fn tunnel_tcp_server(
     Ok(())
 }
 
-// TODO - add support for multiple connections throuth tunnel - currently support only one connection
+// TODO - make sure only one udp application is connected. No multiple applications for UDP
 pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let listener = Arc::new(UdpSocket::bind(&listen_addr).await?);
@@ -205,7 +205,7 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
     Ok(())
 }
 
-// TODO - add support for multiple connections throuth tunnel - currently suppurt one connection
+
 pub async fn tunnel_udp_server(
     mut recv: RecvStream,
     mut send: SendStream,
