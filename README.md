@@ -5,17 +5,17 @@ Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC proto
 Rusnel is mainly useful for passing through firewalls, though it can also be used to provide a secure endpoint into your network.
 
 ## Features
-
 -   Easy to use
--   Utilizes the latest advancements in QUIC for fast and secure communication.
--   Encrypted connections using the QUIC protocol
+-   Single executable including both client and server.
+-   Utilizes the latest advancements in QUIC for fast and multiplexed communication.
+-   Encrypted connections using the QUIC protocol (Tls1.3)
 -   Clients can create multiple tunnel endpoints over one TCP connection
 -   Reverse port forwarding (Connections go through the server and out the client)
--   Server optionally allows SOCKS5 connections (See guide below)
+-   Server allows SOCKS5 connections
 -   Clients allow SOCKS5 connections from a reversed port forward
 
 
-## Installation
+## Install
 Clone the repository and build the project:
 ```bash
 git clone https://github.com/guyte149/Rusnel.git
@@ -25,21 +25,91 @@ cargo build --release
 
 ## Usage
 ```bash
-./target/release/rusnel [OPTIONS]
+$ rusnel --help
+A fast tcp/udp tunnel
+
+Usage: rusnel <COMMAND>
+
+Commands:
+  server  run Rusnel in server mode
+  client  run Rusnel in client mode
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+```bash
+$ target/debug/rusnel server --help
+run Rusnel in server mode
+
+Usage: rusnel server [OPTIONS]
+
+Options:
+      --host <HOST>    defines Rusnel listening host (the network interface) [default: 0.0.0.0]
+  -p, --port <PORT>    defines Rusnel listening port [default: 8080]
+      --allow-reverse  Allow clients to specify reverse port forwarding remotes
+  -v, --verbose        enable verbose logging
+      --debug          enable debug logging
+  -h, --help           Print help
+```
+
+```bash
+$ rusnel client --help
+run Rusnel in client mode
+
+Usage: rusnel client [OPTIONS] <SERVER> <remote>...
+
+Arguments:
+  <SERVER>     defines the Rusnel server address (in form of host:port)
+  <remote>...
+               <remote>s are remote connections tunneled through the server, each which come in the form:
+
+                   <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
+
+                   ■ local-host defaults to 0.0.0.0 (all interfaces).
+                   ■ local-port defaults to remote-port.
+                   ■ remote-port is required*.
+                   ■ remote-host defaults to 0.0.0.0 (server localhost).
+                   ■ protocol defaults to tcp.
+
+               which shares <remote-host>:<remote-port> from the server to the client as <local-host>:<local-port>, or:
+
+                   R:<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
+
+               which does reverse port forwarding,
+               sharing <remote-host>:<remote-port> from the client to the server's <local-host>:<local-port>.
+
+                   example remotes
+
+                       1337
+                       example.com:1337
+                       1337:google.com:80
+                       192.168.1.14:5000:google.com:80
+                       socks
+                       5000:socks
+                       R:2222:localhost:22
+                       R:socks
+                       R:5000:socks
+                       1.1.1.1:53/udp
+
+                   When the Rusnel server has --allow-reverse enabled, remotes can be prefixed with R to denote that they are reversed.
+
+                   Remotes can specify "socks" in place of remote-host and remote-port.
+                   The default local host and port for a "socks" remote is 127.0.0.1:1080.
+
+
+Options:
+  -v, --verbose  enable verbose logging
+      --debug    enable debug logging
+  -h, --help     Print help
 ```
 
 ## TODO
-- [v] Rusnel never shuts down connection with remote (check)
-- [v] write better --help
 - [ ] write tests for tcp, udp, reverse and socks - better convert to python tests
-- [v] add reverse sock5 tunneling support
-- [v] add server --allow-reverse flag
 - [ ] improve logging by adding the connection and stream that the log is reffered to
 - [ ] client reconnect
-- [v] add sock5 tunneling support
-- [v] add reverse tunneling support
-- [v] support multiple connections through a single tunnel
-- [v] support multiple connections through UDP tunnel
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] generate a hardcoded key and CA every compliation
 - [ ] add mtls authentication
