@@ -39,7 +39,7 @@ impl RemoteRequest {
     }
 }
 
-impl FromStr for RemoteRequest{
+impl FromStr for RemoteRequest {
     type Err = anyhow::Error;
 
     fn from_str(remote_str: &str) -> Result<RemoteRequest> {
