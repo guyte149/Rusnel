@@ -10,7 +10,7 @@ documentation = "https://docs.rs/rusnel"
 homepage = "https://github.com/guyte149/Rusnel"
 readme = "README.md"
 keywords = ["tunnel", "socks", "quic", "rusnel"]
-categories = ["tunneling-tool"]
+categories = ["network-programming"]
 
 [dependencies]
 clap = { version = "4.5.9", features = ["derive", "color", "suggestions", "cargo"] }
