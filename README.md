@@ -120,4 +120,5 @@ Options:
 - [ ] add server tls certificate verificatin
 - [ ] add mutual tls verification
 - [ ] add fake-beckend http/3 feature to server
+- [ ] close QUIC connection when receiving ^C
 

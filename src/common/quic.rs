@@ -7,8 +7,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
 use std::net::{IpAddr, SocketAddr};
 use std::{sync::Arc, time::Duration};
-
-use crate::verbose;
+use tracing::debug;
 
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
@@ -60,7 +59,7 @@ fn create_client_config() -> Result<ClientConfig> {
 }
 
 fn get_server_certificate_and_key() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
-    verbose!("generating self-signed certificate");
+    debug!("generating self-signed certificate");
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let cert = cert.cert.into();

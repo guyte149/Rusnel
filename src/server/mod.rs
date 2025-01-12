@@ -1,24 +1,24 @@
 use anyhow::Result;
 
 use quinn::Connection;
-use tracing::{error, info, info_span};
+use tracing::{debug, error, info, info_span};
 
 use crate::common::quic::create_server_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
-use crate::common::tunnel::server_recieve_remote_request;
+use crate::common::tunnel::server_receive_remote_request;
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{verbose, ServerConfig};
 
 #[tokio::main]
 pub async fn run(config: ServerConfig) -> Result<()> {
     let endpoint = create_server_endpoint(config.host, config.port)?;
-    info!("listening on {}", endpoint.local_addr()?);
+    info!("Listening on {}", endpoint.local_addr()?);
 
     // accept incoming clients
     while let Some(conn) = endpoint.accept().await {
-        info!("client connected: {}", conn.remote_address());
+        verbose!("rusnel client connected: {}", conn.remote_address());
         let fut = handle_client_connection(conn, config.allow_reverse);
         tokio::spawn(async move {
             if let Err(e) = fut.await {
@@ -49,15 +49,14 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
         loop {
             let quic_connection = connection.clone();
             let stream = quic_connection.accept_bi().await;
-            info!("new stream accepted");
 
             let stream = match stream {
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    info!("connection closed");
+                    debug!("connection closed");
                     return Ok(());
                 }
                 Err(e) => {
-                    info!("some error occured");
+                    error!("some error occured: {}", e);
                     return Err(e);
                 }
                 Ok(s) => s,
@@ -79,9 +78,9 @@ async fn handle_remote_stream(
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     allow_reverse: bool,
 ) -> Result<()> {
-    verbose!("handling remote stream with client");
+    debug!("handling remote stream with client");
 
-    let request = server_recieve_remote_request(&mut send, &mut recv, allow_reverse).await?;
+    let request = server_receive_remote_request(&mut send, &mut recv, allow_reverse).await?;
 
     match request {
         // reverse socks

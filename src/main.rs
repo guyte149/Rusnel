@@ -2,7 +2,7 @@ use clap::crate_version;
 use clap::{Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
 use rusnel::macros::set_verbose;
-use rusnel::{run_client, run_server, verbose, ClientConfig, ServerConfig};
+use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
 use std::str::FromStr;
@@ -117,7 +117,7 @@ fn main() {
                 port,
                 allow_reverse,
             };
-            verbose!("Initialized server with config: {:?}", server_config);
+            debug!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
         }
         Mode::Client {
@@ -146,7 +146,7 @@ fn main() {
                 server: server_addr,
                 remotes: remotes_list,
             };
-            verbose!("Initialized client with config: {:?}", client_config);
+            debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }
     }

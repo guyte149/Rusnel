@@ -16,7 +16,7 @@ use anyhow::{anyhow, Result};
 pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let listener = TcpListener::bind(&local_addr).await?;
-    info!("SOCKS5 proxy running on {}", &local_addr);
+    info!("SOCKS5 proxy listening on {}", &local_addr);
 
     loop {
         let (mut local_conn, local_addr) = listener.accept().await?;
