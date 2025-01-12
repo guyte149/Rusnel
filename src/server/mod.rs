@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::Result;
 
 use quinn::Connection;
-use tracing::{debug, error, info, info_span};
+use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::common::quic::create_server_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
@@ -16,21 +18,27 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let endpoint = create_server_endpoint(config.host, config.port)?;
     info!("Listening on {}", endpoint.local_addr()?);
 
+    let session_counter = AtomicUsize::new(0); 
+
     // accept incoming clients
     while let Some(conn) = endpoint.accept().await {
+        let session_num = session_counter.fetch_add(1, Ordering::Relaxed);
         verbose!("rusnel client connected: {}", conn.remote_address());
+        let span = info_span!("session", session = session_num, remote_addr = %conn.remote_address());
         let fut = handle_client_connection(conn, config.allow_reverse);
-        tokio::spawn(async move {
+        tokio::spawn(async move {   
             if let Err(e) = fut.await {
                 error!("connection failed: {reason}", reason = e.to_string())
             }
-        });
+        }.instrument(span));
     }
     Ok(())
 }
 
 async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) -> Result<()> {
     let connection = conn.await?;
+
+    info!("test");
 
     // TODO: save the connection data to a struct (ClientInfo) and then use it in logs.
     info_span!(
