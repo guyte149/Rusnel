@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use quinn::{RecvStream, SendStream};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::common::remote::RemoteResponse;
 use crate::common::utils::SerdeHelper;
@@ -31,12 +31,12 @@ pub async fn client_send_remote_request(
         }
     }
 
-    info!("Created remote stream to {:?}", remote);
+    debug!("Created remote stream: {:?}", remote);
 
     Ok(())
 }
 
-pub async fn server_recieve_remote_request(
+pub async fn server_receive_remote_request(
     send_channel: &mut SendStream,
     recv_channel: &mut RecvStream,
     allow_reverse: bool,
@@ -46,10 +46,11 @@ pub async fn server_recieve_remote_request(
     let n = recv_channel.read(&mut buffer).await?.unwrap();
     let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
 
+    verbose!("Received remote request: {:?}", request);
+
     if request.reversed && !allow_reverse {
         let response =
             RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
-        verbose!("sending failed remote response to client {:?}", response);
         send_channel
             .write_all(response.to_json()?.as_bytes())
             .await?;
@@ -57,7 +58,7 @@ pub async fn server_recieve_remote_request(
     }
 
     let response = RemoteResponse::RemoteOk;
-    verbose!("sending remote response to client {:?}", response);
+    debug!("sending remote response to client {:?}", response);
     send_channel
         .write_all(response.to_json()?.as_bytes())
         .await?;
@@ -72,7 +73,7 @@ pub async fn client_send_remote_start(
     debug!("sending remote start to server");
     send_channel.write_all(remote_start).await?;
 
-    info!("Starting remote stream to {:?}", remote);
+    verbose!("Starting remote stream to: {:?}", remote);
 
     // TODO - maybe validate server "remoted started"
     Ok(())
@@ -83,6 +84,6 @@ pub async fn server_receive_remote_start(recv_channel: &mut RecvStream) -> Resul
     let n: usize = recv_channel.read(&mut buffer).await?.unwrap();
     let start: String = String::from_utf8_lossy(&buffer[..n]).into();
 
-    verbose!("Received remote start command: {}", start);
+    debug!("Received remote start command: {}", start);
     Ok(())
 }

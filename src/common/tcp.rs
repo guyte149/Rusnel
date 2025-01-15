@@ -4,7 +4,7 @@ use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
 };
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     common::tunnel::{
@@ -45,7 +45,7 @@ pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteReques
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
     // Listen for incoming connections
     let listener = TcpListener::bind(&local_addr).await?;
-    info!("listening on: {}", local_addr);
+    info!("TCP tunnel listening on: {}", local_addr);
     loop {
         // Asynchronously wait for an incoming connection
         let (local_socket, addr) = listener.accept().await?;
@@ -73,9 +73,9 @@ pub async fn tunnel_tcp_server(
     server_receive_remote_start(&mut recv_channel).await?;
 
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
-    verbose!("connecting to remote: {}", remote_addr);
+    debug!("connecting to tunnel remote: {}", remote_addr);
     let tcp_stream = TcpStream::connect(&remote_addr).await?;
-    verbose!("connected to remote: {}", remote_addr);
+    debug!("connected to tunnel remote: {}", remote_addr);
 
     tunnel_tcp_stream(tcp_stream, send_channel, recv_channel).await?;
 

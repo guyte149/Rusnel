@@ -8,7 +8,7 @@ use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
-use crate::common::tunnel::{client_send_remote_request, server_recieve_remote_request};
+use crate::common::tunnel::{client_send_remote_request, server_receive_remote_request};
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::ClientConfig;
 
@@ -18,7 +18,7 @@ pub async fn run(config: ClientConfig) -> Result<()> {
 
     info!("connecting to server at: {}", config.server);
     let connection = endpoint.connect(config.server, "localhost")?.await?;
-    info!("Connected to server at {}", connection.remote_address());
+    info!("Connected");
 
     debug!("remotes are: {:?}", config.remotes);
 
@@ -105,12 +105,11 @@ async fn client_accept_dynamic_reverse_remote(quic_connection: Connection) -> Re
     // listen for dyanmic reversed remotes
     let quic_connection = quic_connection.clone();
     let stream = quic_connection.accept_bi().await?;
-    info!("new stream accepted");
 
     let (mut send, mut recv) = stream;
 
     tokio::spawn(async move {
-        let dynamic_remote = server_recieve_remote_request(&mut send, &mut recv, true).await?;
+        let dynamic_remote = server_receive_remote_request(&mut send, &mut recv, true).await?;
         match dynamic_remote {
             // reverse Tcp remoet
             RemoteRequest {

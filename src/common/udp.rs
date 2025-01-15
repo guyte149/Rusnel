@@ -4,7 +4,7 @@ use std::sync::Arc;
 use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{common::tunnel::client_send_remote_request, verbose};
 
@@ -50,7 +50,7 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let udp_socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
 
-    info!("listening on UDP: {}", listen_addr);
+    info!("UDP tunnel listening on: {}", listen_addr);
 
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
     client_send_remote_request(&remote, &mut send_channel, &mut recv_channel).await?;
@@ -77,7 +77,7 @@ pub async fn tunnel_udp_server(
 
     let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
-    verbose!("connecting to remote UDP: {}", remote_addr);
+    debug!("connecting to remote UDP: {}", remote_addr);
 
     tunnel_udp_stream(udp_socket, remote_addr, send_channel, recv_channel).await?;
 
