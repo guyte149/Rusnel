@@ -7,7 +7,6 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
 use std::str::FromStr;
 use tracing::debug;
-use tracing_subscriber::fmt;
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
