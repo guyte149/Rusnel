@@ -3,11 +3,11 @@ use clap::{Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
 use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
-use tracing_subscriber::fmt;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
 use std::str::FromStr;
 use tracing::debug;
+use tracing_subscriber::fmt;
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
