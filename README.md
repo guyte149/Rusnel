@@ -1,5 +1,7 @@
 # Rusnel
 
+[![Crates.io](https://img.shields.io/crates/v/rusnel.svg)](https://crates.io/crates/rusnel)
+
 ## Description
 Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC protocol. Single executable including both client and server. Written in Rust.
 
@@ -115,7 +117,7 @@ Options:
 
 ## TODO
 - [ ] write tests for tcp, udp, reverse and socks - better convert to python tests
-- [ ] improve logging by adding the connection and stream that the log is reffered to
+- [ ] improve logging by for each tunnel
 - [ ] client reconnect
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add server tls certificate verificatin
