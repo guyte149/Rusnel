@@ -9,10 +9,11 @@ Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC proto
 -   Single executable including both client and server.
 -   Uses QUIC protocol for fast and multiplexed communication.
 -   Encrypted connections using the QUIC protocol (Tls1.3)
--   Clients can create multiple tunnel endpoints over one TCP connection
--   Reverse port forwarding (Connections go through the server and out the client)
--   Server allows SOCKS5 connections
--   Clients allow SOCKS5 connections from a reversed port forward
+-   Static forward tunneling (TCP, UDP)
+-   Static reverse tunneling (TCP, UDP)
+-   Dynamic tunneling (socks5)
+-   Dynamic reverse tunneling (reverse socks5)
+
 
 
 ## Install

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 
 use quinn::Connection;
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, Instrument, Span};
 
 use crate::common::quic::create_server_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
@@ -23,34 +23,23 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     // accept incoming clients
     while let Some(conn) = endpoint.accept().await {
         let session_num = session_counter.fetch_add(1, Ordering::Relaxed);
-        verbose!("rusnel client connected: {}", conn.remote_address());
         let span = info_span!("session", session = session_num, remote_addr = %conn.remote_address());
+        let _guard = span.enter();
+
+        verbose!("rusnel client connected");
+
         let fut = handle_client_connection(conn, config.allow_reverse);
         tokio::spawn(async move {   
             if let Err(e) = fut.await {
                 error!("connection failed: {reason}", reason = e.to_string())
             }
-        }.instrument(span));
+        }.instrument(span.clone()));
     }
     Ok(())
 }
 
 async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) -> Result<()> {
     let connection = conn.await?;
-
-    info!("test");
-
-    // TODO: save the connection data to a struct (ClientInfo) and then use it in logs.
-    info_span!(
-        "connection",
-        remote = %connection.remote_address(),
-        protocol = %connection
-            .handshake_data()
-            .unwrap()
-            .downcast::<quinn::crypto::rustls::HandshakeData>().unwrap()
-            .protocol
-            .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
-    );
 
     async {
         // Each stream initiated by the client constitutes a new remote request.
@@ -74,7 +63,7 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
                 if let Err(e) = fut.await {
                     error!("failed: {reason}", reason = e.to_string());
                 }
-            });
+            }.instrument(Span::current()));
         }
     }
     .await?;
@@ -84,11 +73,12 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
 async fn handle_remote_stream(
     quic_connection: Connection,
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
-    allow_reverse: bool,
+    allow_reverse: bool
 ) -> Result<()> {
     debug!("handling remote stream with client");
 
     let request = server_receive_remote_request(&mut send, &mut recv, allow_reverse).await?;
+
 
     match request {
         // reverse socks
