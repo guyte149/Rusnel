@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Result};
+use anyhow::Result;
 use quinn::{Connection, VarInt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
@@ -42,7 +42,9 @@ pub async fn run(config: ClientConfig) -> Result<()> {
         // Spawn a task to listen for ^C
         let shutdown_tx_clone = shutdown_tx.clone();
         tokio::spawn(async move {
-            signal::ctrl_c().await.expect("Failed to listen for ^C signal");
+            signal::ctrl_c()
+                .await
+                .expect("Failed to listen for ^C signal");
             info!("Shutdown signal received. Broadcasting shutdown...");
             let _ = shutdown_tx_clone.send(());
         });
@@ -54,7 +56,7 @@ pub async fn run(config: ClientConfig) -> Result<()> {
         for remote in config.remotes.clone() {
             let connection_clone = connection.clone();
 
-            let task= task::spawn(async move {
+            let task = task::spawn(async move {
                 if let Err(e) = handle_remote_stream(connection_clone, remote).await {
                     error!("Task failed: {}", e)
                 }
