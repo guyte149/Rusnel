@@ -116,12 +116,11 @@ Options:
 ```
 
 ## TODO
-- [ ] write tests for tcp, udp, reverse and socks - better convert to python tests
+- [ ] write tests in rust for tcp, udp, reverse and socks 
 - [ ] improve logging by for each tunnel
-- [ ] client reconnect
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add server tls certificate verificatin
 - [ ] add mutual tls verification
 - [ ] add fake-beckend http/3 feature to server
-- [ ] close QUIC connection when receiving ^C
+- [ ] client reconnect
 

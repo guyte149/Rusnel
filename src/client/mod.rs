@@ -19,7 +19,7 @@ pub async fn run(config: ClientConfig) -> Result<()> {
     let endpoint = create_client_endpoint()?;
 
     info!("connecting to server at: {}", config.server);
-    let connection_result = endpoint.connect(config.server, "localhost")?.await;
+    let connection_result = endpoint.connect(config.server, "a")?.await;
 
     let connection = match connection_result {
         Ok(conn) => {
