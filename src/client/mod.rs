@@ -95,7 +95,6 @@ pub async fn run(config: ClientConfig) -> Result<()> {
         }
     }
 
-        
     verbose!("Run function completed");
     Ok(())
 }
