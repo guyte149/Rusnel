@@ -53,7 +53,7 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
 
             let stream = match stream {
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("connection closed");
+                    verbose!("Client closed the connection");
                     return Ok(());
                 }
                 Err(e) => {

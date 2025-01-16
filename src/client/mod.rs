@@ -1,7 +1,8 @@
-use anyhow::{Ok, Result};
-use quinn::Connection;
+use anyhow::{anyhow, Result};
+use quinn::{Connection, VarInt};
 use tokio::io::AsyncWriteExt;
-use tokio::task;
+use tokio::sync::broadcast;
+use tokio::{signal, task};
 use tracing::{debug, error, info};
 
 use crate::common::quic::create_client_endpoint;
@@ -10,40 +11,89 @@ use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::{client_send_remote_request, server_receive_remote_request};
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
-use crate::ClientConfig;
+use crate::{verbose, ClientConfig};
 
+// TODO - refactor this function
 #[tokio::main]
 pub async fn run(config: ClientConfig) -> Result<()> {
     let endpoint = create_client_endpoint()?;
 
     info!("connecting to server at: {}", config.server);
-    let connection = endpoint.connect(config.server, "localhost")?.await?;
-    info!("Connected");
+    let connection_result = endpoint.connect(config.server, "a")?.await;
+
+    let connection = match connection_result {
+        Ok(conn) => {
+            info!("Connected successfully");
+            conn
+        }
+        Err(e) => {
+            return Err(anyhow!("Connection failed: {}", e));
+        }
+    };
+
+    // Create a broadcast channel for shutdown signal
+    let (shutdown_tx, _) = broadcast::channel(1);
+
+    // Spawn a task to listen for ^C
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ^C signal");
+        info!("Shutdown signal received. Broadcasting shutdown...");
+        let _ = shutdown_tx_clone.send(());
+    });
 
     debug!("remotes are: {:?}", config.remotes);
 
     let mut tasks = Vec::new();
 
-    for remote in config.remotes {
-        let connection = connection.clone();
+    for remote in config.remotes.clone() {
+        let connection_clone = connection.clone();
 
         let task = task::spawn(async move {
-            handle_remote_stream(connection, remote).await?;
-            Ok(())
+            if let Err(e) = handle_remote_stream(connection_clone, remote).await {
+                error!("Task failed: {}", e)
+            }
+            anyhow::Ok(())
         });
         tasks.push(task);
     }
 
-    for task in tasks {
-        if let Err(e) = task.await? {
-            error!("Task failed: {}", e);
+    let connection_clone = connection.clone();
+    let accept_reverse_task = tokio::spawn(async move {
+        loop {
+            let quic_connection = connection_clone.clone();
+            if let Err(e) = client_accept_dynamic_reverse_remote(quic_connection).await {
+                error!("Error in accepting dynamic reverse remote: {}", e);
+                break;
+            }
+        }
+        anyhow::Ok(())
+    });
+
+    tasks.push(accept_reverse_task);
+
+    // Wait for shutdown signal or tasks to finish
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    tokio::select! {
+        _ = shutdown_rx.recv() => {
+            info!("Shutting down tasks...");
+            // Abort all tasks
+            for handle in tasks {
+                handle.abort();
+            }
+            connection.close(VarInt::from_u32(130), b"client received ^C");
+            endpoint.wait_idle().await;
+            info!("closed connection");
+        }
+        _ = futures::future::join_all(tasks.iter_mut()) => {
+            info!("All tasks completed");
         }
     }
 
-    loop {
-        let quic_connection = connection.clone();
-        client_accept_dynamic_reverse_remote(quic_connection).await?;
-    }
+    verbose!("Run function completed");
+    Ok(())
 }
 
 async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
@@ -137,7 +187,7 @@ async fn client_accept_dynamic_reverse_remote(quic_connection: Connection) -> Re
 
             _ => error!("received dynamic remote that is not reversed!"),
         }
-        Ok(())
+        anyhow::Ok(())
     });
     Ok(())
 }
