@@ -19,8 +19,8 @@ pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint> {
 
     // TODO: put this in another function
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+    // transport_config.max_idle_timeout(None);
+    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
 
     Ok(Endpoint::server(server_config, addr)?)
 }
