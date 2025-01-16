@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use quinn::{Connection, VarInt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
@@ -16,90 +16,86 @@ use crate::common::tunnel::{client_send_remote_request, server_receive_remote_re
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{verbose, ClientConfig};
 
+// TODO - refactor this function
 #[tokio::main]
 pub async fn run(config: ClientConfig) -> Result<()> {
     let endpoint = create_client_endpoint()?;
 
-    loop {
-        info!("connecting to server at: {}", config.server);
-        let connection_result = endpoint.connect(config.server, "localhost")?.await;
+    info!("connecting to server at: {}", config.server);
+    let connection_result = endpoint.connect(config.server, "localhost")?.await;
 
-        let connection = match connection_result {
-            Ok(conn) => {
-                info!("Connected successfully");
-                conn
-            }
-            Err(e) => {
-                error!("Connection failed: {}. Retrying in 30 seconds...", e); // TODO: replace in configurable value
-                sleep(Duration::from_secs(30)).await; // TODO: replace in configurable value
-                continue;
-            }
-        };
-
-        // Create a broadcast channel for shutdown signal
-        let (shutdown_tx, _) = broadcast::channel(1);
-
-        // Spawn a task to listen for ^C
-        let shutdown_tx_clone = shutdown_tx.clone();
-        tokio::spawn(async move {
-            signal::ctrl_c()
-                .await
-                .expect("Failed to listen for ^C signal");
-            info!("Shutdown signal received. Broadcasting shutdown...");
-            let _ = shutdown_tx_clone.send(());
-        });
-
-        debug!("remotes are: {:?}", config.remotes);
-
-        let mut tasks = Vec::new();
-
-        for remote in config.remotes.clone() {
-            let connection_clone = connection.clone();
-
-            let task = task::spawn(async move {
-                if let Err(e) = handle_remote_stream(connection_clone, remote).await {
-                    error!("Task failed: {}", e)
-                }
-                anyhow::Ok(())
-            });
-            tasks.push(task);
+    let connection = match connection_result {
+        Ok(conn) => {
+            info!("Connected successfully");
+            conn
         }
+        Err(e) => {
+            return Err(anyhow!("Connection failed: {}", e));
+        }
+    };
 
+    // Create a broadcast channel for shutdown signal
+    let (shutdown_tx, _) = broadcast::channel(1);
+
+    // Spawn a task to listen for ^C
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ^C signal");
+        info!("Shutdown signal received. Broadcasting shutdown...");
+        let _ = shutdown_tx_clone.send(());
+    });
+
+    debug!("remotes are: {:?}", config.remotes);
+
+    let mut tasks = Vec::new();
+
+    for remote in config.remotes.clone() {
         let connection_clone = connection.clone();
-        let accept_reverse_task = tokio::spawn(async move {
-            loop {
-                let quic_connection = connection_clone.clone();
-                if let Err(e) = client_accept_dynamic_reverse_remote(quic_connection).await {
-                    error!("Error in accepting dynamic reverse remote: {}", e);
-                    break;
-                }
+
+        let task = task::spawn(async move {
+            if let Err(e) = handle_remote_stream(connection_clone, remote).await {
+                error!("Task failed: {}", e)
             }
             anyhow::Ok(())
         });
+        tasks.push(task);
+    }
 
-        tasks.push(accept_reverse_task);
-
-        // Wait for shutdown signal or tasks to finish
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                info!("Shutting down tasks...");
-                // Abort all tasks
-                for handle in tasks {
-                    handle.abort();
-                }
-                connection.close(VarInt::from_u32(130), b"client received ^C");
-                endpoint.wait_idle().await;
-                info!("closed connection");
+    let connection_clone = connection.clone();
+    let accept_reverse_task = tokio::spawn(async move {
+        loop {
+            let quic_connection = connection_clone.clone();
+            if let Err(e) = client_accept_dynamic_reverse_remote(quic_connection).await {
+                error!("Error in accepting dynamic reverse remote: {}", e);
                 break;
             }
-            _ = futures::future::join_all(tasks.iter_mut()) => {
-                info!("All tasks completed");
-            }
         }
+        anyhow::Ok(())
+    });
 
-        verbose!("restarting connection loop...");
+    tasks.push(accept_reverse_task);
+
+    // Wait for shutdown signal or tasks to finish
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    tokio::select! {
+        _ = shutdown_rx.recv() => {
+            info!("Shutting down tasks...");
+            // Abort all tasks
+            for handle in tasks {
+                handle.abort();
+            }
+            connection.close(VarInt::from_u32(130), b"client received ^C");
+            endpoint.wait_idle().await;
+            info!("closed connection");
+        }
+        _ = futures::future::join_all(tasks.iter_mut()) => {
+            info!("All tasks completed");
+        }
     }
+
+        
     verbose!("Run function completed");
     Ok(())
 }
