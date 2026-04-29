@@ -18,7 +18,7 @@ pub fn run(config: ServerConfig) -> Result<()> {
 }
 
 pub async fn run_async(config: ServerConfig) -> Result<()> {
-    let endpoint = create_server_endpoint(config.host, config.port)?;
+    let endpoint = create_server_endpoint(config.host, config.port, &config.tls)?;
     info!("Listening on {}", endpoint.local_addr()?);
 
     let session_counter = AtomicUsize::new(0);

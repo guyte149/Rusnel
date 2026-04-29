@@ -18,7 +18,7 @@ pub fn run(config: ClientConfig) -> Result<()> {
 }
 
 pub async fn run_async(config: ClientConfig) -> Result<()> {
-    let endpoint = create_client_endpoint()?;
+    let endpoint = create_client_endpoint(&config.tls)?;
 
     info!("connecting to server at: {}", config.server);
     let connection_result = endpoint.connect(config.server, "a")?.await;

@@ -23,6 +23,9 @@ rmp-serde = "1"
 serde = { version = "1.0.*", features = ["derive"] }
 anyhow = "1.0.86"
 futures = "0.3.31"
+sha2 = "0.11.0"
+rustls-pemfile = "2.2.0"
+dirs = "6.0.0"
 
 [lints.clippy]
 unwrap_used = "deny"

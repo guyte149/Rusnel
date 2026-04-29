@@ -1,9 +1,11 @@
 use clap::crate_version;
 use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
+use rusnel::common::tls::{ClientTlsConfig, ServerTlsConfig};
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::debug;
 
@@ -35,6 +37,11 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Mode {
     /// run Rusnel in server mode
+    #[command(group(
+        ArgGroup::new("server_tls_mode")
+            .required(true)
+            .args(["insecure", "tls_self_signed", "tls_cert"]),
+    ))]
     Server {
         /// defines Rusnel listening host (the network interface)
         #[arg(long, default_value_t = IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)))]
@@ -48,6 +55,33 @@ enum Mode {
         #[arg(long, default_value_t = false)]
         allow_reverse: bool,
 
+        /// Disable all TLS authentication. Uses an ephemeral self-signed
+        /// certificate and accepts any client. MITM-vulnerable; for testing
+        /// only.
+        #[arg(long, default_value_t = false)]
+        insecure: bool,
+
+        /// Use a self-signed certificate persisted under --tls-state-dir
+        /// (default: ~/.rusnel). Generated on first run; reused on subsequent
+        /// runs so the fingerprint stays stable.
+        #[arg(long, default_value_t = false, conflicts_with_all = ["insecure", "tls_cert", "tls_key"])]
+        tls_self_signed: bool,
+
+        /// Directory used to persist the self-signed cert/key. Implies
+        /// --tls-self-signed.
+        #[arg(long, value_name = "DIR", requires = "tls_self_signed")]
+        tls_state_dir: Option<PathBuf>,
+
+        /// Path to the server's PEM-encoded certificate. Must be paired with
+        /// --tls-key.
+        #[arg(long, value_name = "PATH", requires = "tls_key", conflicts_with_all = ["insecure", "tls_self_signed"])]
+        tls_cert: Option<PathBuf>,
+
+        /// Path to the server's PEM-encoded private key. Must be paired with
+        /// --tls-cert.
+        #[arg(long, value_name = "PATH", requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -57,6 +91,11 @@ enum Mode {
         is_debug: bool,
     },
     /// run Rusnel in client mode
+    #[command(group(
+        ArgGroup::new("client_tls_mode")
+            .required(true)
+            .args(["insecure"]),
+    ))]
     Client {
         /// defines the Rusnel server address (in form of host:port)
         #[arg(value_parser = parse_server_addr)]
@@ -100,6 +139,11 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         "#)]
         remotes: Vec<RemoteRequest>,
 
+        /// Disable server certificate verification. MITM-vulnerable; for
+        /// testing only.
+        #[arg(long, default_value_t = false)]
+        insecure: bool,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -108,6 +152,48 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         #[arg(long("debug"), default_value_t = false)]
         is_debug: bool,
     },
+}
+
+/// Resolve the server CLI flags into a [`ServerTlsConfig`]. Clap's `ArgGroup`
+/// already guarantees exactly one mode flag is set, so this is just a mapping.
+fn resolve_server_tls(
+    insecure: bool,
+    tls_self_signed: bool,
+    tls_state_dir: Option<PathBuf>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+) -> Result<ServerTlsConfig, String> {
+    if insecure {
+        return Ok(ServerTlsConfig::Insecure);
+    }
+    if tls_self_signed {
+        let state_dir = match tls_state_dir {
+            Some(p) => p,
+            None => default_state_dir()?,
+        };
+        return Ok(ServerTlsConfig::SelfSigned { state_dir });
+    }
+    match (tls_cert, tls_key) {
+        (Some(cert), Some(key)) => Ok(ServerTlsConfig::Provided { cert, key }),
+        // Unreachable in practice: clap's `requires` enforces the pairing and
+        // the ArgGroup guarantees one mode is selected.
+        _ => Err("internal error: TLS mode flags not validated correctly".into()),
+    }
+}
+
+/// Default state dir for persisted self-signed certs: `~/.rusnel`.
+fn default_state_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|h| h.join(".rusnel"))
+        .ok_or_else(|| "could not determine home directory; pass --tls-state-dir explicitly".into())
+}
+
+fn resolve_client_tls(insecure: bool) -> ClientTlsConfig {
+    // Only --insecure is supported on the client until fingerprint pinning
+    // and CA-based modes land in subsequent PRs. Clap's ArgGroup makes
+    // --insecure required for now.
+    debug_assert!(insecure);
+    ClientTlsConfig::Insecure
 }
 
 fn main() {
@@ -127,15 +213,32 @@ fn main() {
             host,
             port,
             allow_reverse,
+            insecure,
+            tls_self_signed,
+            tls_state_dir,
+            tls_cert,
+            tls_key,
             is_verbose,
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
 
+            let tls = match resolve_server_tls(
+                insecure,
+                tls_self_signed,
+                tls_state_dir,
+                tls_cert,
+                tls_key,
+            ) {
+                Ok(t) => t,
+                Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
+            };
+
             let server_config = ServerConfig {
                 host,
                 port,
                 allow_reverse,
+                tls,
             };
             debug!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
@@ -143,12 +246,17 @@ fn main() {
         Mode::Client {
             server,
             remotes,
+            insecure,
             is_verbose,
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
 
-            let client_config = ClientConfig { server, remotes };
+            let client_config = ClientConfig {
+                server,
+                remotes,
+                tls: resolve_client_tls(insecure),
+            };
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }

@@ -13,6 +13,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use rusnel::common::remote::RemoteRequest;
+use rusnel::common::tls::{ClientTlsConfig, ServerTlsConfig};
 use rusnel::{ClientConfig, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -48,6 +49,7 @@ pub fn server_config(port: u16, allow_reverse: bool) -> ServerConfig {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port,
         allow_reverse,
+        tls: ServerTlsConfig::Insecure,
     }
 }
 
@@ -55,6 +57,7 @@ pub fn client_config(server_port: u16, remotes: Vec<RemoteRequest>) -> ClientCon
     ClientConfig {
         server: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server_port),
         remotes,
+        tls: ClientTlsConfig::Insecure,
     }
 }
 

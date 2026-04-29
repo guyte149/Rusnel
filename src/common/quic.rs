@@ -1,21 +1,25 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::ServerConfig;
 use quinn::{ClientConfig, Endpoint};
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
+use std::fs;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::{sync::Arc, time::Duration};
-use tracing::debug;
+use tracing::{debug, info, warn};
+
+use crate::common::tls::{cert_sha256, format_fingerprint, ClientTlsConfig, ServerTlsConfig};
 
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
-pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint> {
+pub fn create_server_endpoint(host: IpAddr, port: u16, tls: &ServerTlsConfig) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
 
-    let (cert, key) = get_server_certificate_and_key()?;
-    let mut server_config = create_server_config(cert, key)?;
+    let (cert, key) = load_server_identity(tls)?;
+    let mut server_config = build_quic_server_config(tls, cert, key)?;
 
     let transport_config =
         Arc::get_mut(&mut server_config.transport).expect("Failed to get mutable transport config");
@@ -25,20 +29,145 @@ pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint> {
     Ok(Endpoint::server(server_config, addr)?)
 }
 
-pub fn create_client_endpoint() -> Result<Endpoint> {
-    let client_config = create_client_config()?;
+pub fn create_client_endpoint(tls: &ClientTlsConfig) -> Result<Endpoint> {
+    let client_config = build_quic_client_config(tls)?;
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }
 
-fn create_server_config(
+/// Resolve the server's certificate + key from the TLS configuration. Also
+/// logs the leaf-cert SHA-256 fingerprint so operators can pin it from clients.
+fn load_server_identity(
+    tls: &ServerTlsConfig,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let (cert_chain, key) = match tls {
+        ServerTlsConfig::Insecure => {
+            warn!(
+                "starting server in --insecure mode: ephemeral self-signed cert, \
+                 no client authentication. DO NOT use in production."
+            );
+            generate_ephemeral_self_signed()?
+        }
+        ServerTlsConfig::SelfSigned { state_dir } => load_or_create_self_signed(state_dir)?,
+        ServerTlsConfig::Provided { cert, key } => load_pem_identity(cert, key)?,
+        // Implemented in a follow-up PR.
+        ServerTlsConfig::Mtls { .. } => {
+            return Err(anyhow!(
+                "mTLS server mode is not implemented yet; use --tls-self-signed or --tls-cert/--tls-key for now"
+            ));
+        }
+    };
+
+    if let Some(leaf) = cert_chain.first() {
+        let fp = format_fingerprint(&cert_sha256(leaf));
+        info!("server cert fingerprint: {fp}");
+    }
+
+    Ok((cert_chain, key))
+}
+
+/// Either load a previously-persisted self-signed cert from `state_dir`, or
+/// generate a new one and persist it. The returned cert/key live as long as
+/// the process. Files are written as PEM with key file mode 0600 on unix.
+fn load_or_create_self_signed(
+    state_dir: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let cert_path = state_dir.join("server.pem");
+    let key_path = state_dir.join("server.key");
+
+    if cert_path.exists() && key_path.exists() {
+        debug!(
+            "loading persisted self-signed identity from {}",
+            state_dir.display()
+        );
+        return load_pem_identity(&cert_path, &key_path);
+    }
+
+    info!(
+        "no persisted server identity found in {}; generating a new self-signed cert",
+        state_dir.display()
+    );
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
+
+    let generated = generate_simple_self_signed(vec!["localhost".into()])
+        .context("failed to generate self-signed certificate")?;
+    let cert_pem = generated.cert.pem();
+    let key_pem = generated.key_pair.serialize_pem();
+
+    fs::write(&cert_path, &cert_pem)
+        .with_context(|| format!("failed to write {}", cert_path.display()))?;
+    write_secret_file(&key_path, key_pem.as_bytes())
+        .with_context(|| format!("failed to write {}", key_path.display()))?;
+    info!(
+        "persisted server identity to {} and {}",
+        cert_path.display(),
+        key_path.display()
+    );
+
+    let cert_der: CertificateDer<'static> = generated.cert.into();
+    let key_der: PrivateKeyDer<'static> =
+        PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()).into();
+    Ok((vec![cert_der], key_der))
+}
+
+/// Load a PEM-encoded certificate chain + private key from disk.
+fn load_pem_identity(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let cert_pem = fs::read(cert_path)
+        .with_context(|| format!("failed to read cert file {}", cert_path.display()))?;
+    let mut cert_reader = std::io::BufReader::new(cert_pem.as_slice());
+    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("failed to parse PEM certs in {}", cert_path.display()))?;
+    if cert_chain.is_empty() {
+        return Err(anyhow!("no certificates found in {}", cert_path.display()));
+    }
+
+    let key_pem = fs::read(key_path)
+        .with_context(|| format!("failed to read key file {}", key_path.display()))?;
+    let mut key_reader = std::io::BufReader::new(key_pem.as_slice());
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .with_context(|| format!("failed to parse PEM private key in {}", key_path.display()))?
+        .ok_or_else(|| anyhow!("no private key found in {}", key_path.display()))?;
+
+    Ok((cert_chain, key))
+}
+
+/// Write a file containing secret material. On unix, sets mode 0600 so the
+/// key isn't world-readable.
+fn write_secret_file(path: &Path, contents: &[u8]) -> Result<()> {
+    fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+fn build_quic_server_config(
+    tls: &ServerTlsConfig,
     cert: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<ServerConfig> {
-    let mut server_crypto: TlsServerConfig = TlsServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert, key)?;
+    let mut server_crypto: TlsServerConfig = match tls {
+        ServerTlsConfig::Insecure
+        | ServerTlsConfig::SelfSigned { .. }
+        | ServerTlsConfig::Provided { .. } => TlsServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert, key)?,
+        ServerTlsConfig::Mtls { .. } => {
+            return Err(anyhow!(
+                "mTLS server mode is not implemented yet; use --insecure for now"
+            ))
+        }
+    };
 
     server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     Ok(ServerConfig::with_crypto(Arc::new(
@@ -46,11 +175,20 @@ fn create_server_config(
     )))
 }
 
-fn create_client_config() -> Result<ClientConfig> {
-    let mut client_crypto = TlsClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(SkipServerVerification::new())
-        .with_no_client_auth();
+fn build_quic_client_config(tls: &ClientTlsConfig) -> Result<ClientConfig> {
+    let mut client_crypto = match tls {
+        ClientTlsConfig::Insecure => TlsClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(SkipServerVerification::new())
+            .with_no_client_auth(),
+        ClientTlsConfig::Fingerprint { .. }
+        | ClientTlsConfig::Ca { .. }
+        | ClientTlsConfig::Mtls { .. } => {
+            return Err(anyhow!(
+                "this TLS mode is not implemented yet; use --insecure for now"
+            ))
+        }
+    };
 
     client_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     Ok(ClientConfig::new(Arc::new(QuicClientConfig::try_from(
@@ -58,9 +196,9 @@ fn create_client_config() -> Result<ClientConfig> {
     )?)))
 }
 
-fn get_server_certificate_and_key() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>
+fn generate_ephemeral_self_signed() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>
 {
-    debug!("generating self-signed certificate");
+    debug!("generating ephemeral self-signed certificate");
     let cert = generate_simple_self_signed(vec!["localhost".into()])?;
     let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let cert = cert.cert.into();
