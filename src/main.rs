@@ -42,6 +42,7 @@ enum Mode {
             .required(true)
             .args(["insecure", "tls_self_signed", "tls_cert"]),
     ))]
+    #[allow(clippy::too_many_arguments)]
     Server {
         /// defines Rusnel listening host (the network interface)
         #[arg(long, default_value_t = IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)))]
@@ -82,6 +83,11 @@ enum Mode {
         #[arg(long, value_name = "PATH", requires = "tls_cert")]
         tls_key: Option<PathBuf>,
 
+        /// Enable mTLS: require connecting clients to present a certificate
+        /// chained to this CA bundle. Must be paired with --tls-cert/--tls-key.
+        #[arg(long, value_name = "PATH", requires = "tls_cert", conflicts_with_all = ["insecure", "tls_self_signed"])]
+        tls_ca: Option<PathBuf>,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -94,8 +100,9 @@ enum Mode {
     #[command(group(
         ArgGroup::new("client_tls_mode")
             .required(true)
-            .args(["insecure", "tls_fingerprint"]),
+            .args(["insecure", "tls_fingerprint", "tls_ca"]),
     ))]
+    #[allow(clippy::too_many_arguments)]
     Client {
         /// defines the Rusnel server address (in form of host:port)
         #[arg(value_parser = parse_server_addr)]
@@ -148,12 +155,29 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         /// `sha256:<hex>`, bare hex, or colon-separated hex. The expected
         /// value is logged by the server at startup as
         /// `server cert fingerprint: sha256:<hex>`.
-        #[arg(long, value_name = "SHA256", conflicts_with = "insecure")]
+        #[arg(long, value_name = "SHA256", conflicts_with_all = ["insecure", "tls_ca"])]
         tls_fingerprint: Option<String>,
 
-        /// Override the SNI / server name sent during the TLS handshake. By
-        /// default a placeholder is used since fingerprint pinning ignores
-        /// names.
+        /// Verify the server certificate against this CA bundle. Use alone
+        /// for server-auth-only TLS, or pair with --tls-cert/--tls-key for
+        /// full mTLS.
+        #[arg(long, value_name = "PATH", conflicts_with = "insecure")]
+        tls_ca: Option<PathBuf>,
+
+        /// Path to the client's PEM-encoded certificate. Must be paired with
+        /// --tls-key and --tls-ca.
+        #[arg(long, value_name = "PATH", requires_all = ["tls_key", "tls_ca"])]
+        tls_cert: Option<PathBuf>,
+
+        /// Path to the client's PEM-encoded private key. Must be paired with
+        /// --tls-cert and --tls-ca.
+        #[arg(long, value_name = "PATH", requires_all = ["tls_cert", "tls_ca"])]
+        tls_key: Option<PathBuf>,
+
+        /// Override the SNI / server name sent during the TLS handshake. With
+        /// --tls-ca, this name must match a SAN in the server certificate.
+        /// With --tls-fingerprint, the value is sent as SNI but ignored
+        /// during verification.
         #[arg(long, value_name = "NAME")]
         tls_server_name: Option<String>,
 
@@ -175,6 +199,7 @@ fn resolve_server_tls(
     tls_state_dir: Option<PathBuf>,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
+    tls_ca: Option<PathBuf>,
 ) -> Result<ServerTlsConfig, String> {
     if insecure {
         return Ok(ServerTlsConfig::Insecure);
@@ -186,8 +211,9 @@ fn resolve_server_tls(
         };
         return Ok(ServerTlsConfig::SelfSigned { state_dir });
     }
-    match (tls_cert, tls_key) {
-        (Some(cert), Some(key)) => Ok(ServerTlsConfig::Provided { cert, key }),
+    match (tls_cert, tls_key, tls_ca) {
+        (Some(cert), Some(key), Some(ca)) => Ok(ServerTlsConfig::Mtls { cert, key, ca }),
+        (Some(cert), Some(key), None) => Ok(ServerTlsConfig::Provided { cert, key }),
         // Unreachable in practice: clap's `requires` enforces the pairing and
         // the ArgGroup guarantees one mode is selected.
         _ => Err("internal error: TLS mode flags not validated correctly".into()),
@@ -204,6 +230,9 @@ fn default_state_dir() -> Result<PathBuf, String> {
 fn resolve_client_tls(
     insecure: bool,
     tls_fingerprint: Option<String>,
+    tls_ca: Option<PathBuf>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
     tls_server_name: Option<String>,
 ) -> Result<ClientTlsConfig, String> {
     if insecure {
@@ -217,7 +246,20 @@ fn resolve_client_tls(
             server_name: tls_server_name,
         });
     }
-    // Unreachable: clap's ArgGroup guarantees one mode is selected.
+    if let Some(ca) = tls_ca {
+        return Ok(match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => ClientTlsConfig::Mtls {
+                ca,
+                cert,
+                key,
+                server_name: tls_server_name,
+            },
+            _ => ClientTlsConfig::Ca {
+                ca,
+                server_name: tls_server_name,
+            },
+        });
+    }
     Err("internal error: client TLS mode flags not validated correctly".into())
 }
 
@@ -243,6 +285,7 @@ fn main() {
             tls_state_dir,
             tls_cert,
             tls_key,
+            tls_ca,
             is_verbose,
             is_debug,
         } => {
@@ -254,6 +297,7 @@ fn main() {
                 tls_state_dir,
                 tls_cert,
                 tls_key,
+                tls_ca,
             ) {
                 Ok(t) => t,
                 Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
@@ -273,13 +317,23 @@ fn main() {
             remotes,
             insecure,
             tls_fingerprint,
+            tls_ca,
+            tls_cert,
+            tls_key,
             tls_server_name,
             is_verbose,
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
 
-            let tls = match resolve_client_tls(insecure, tls_fingerprint, tls_server_name) {
+            let tls = match resolve_client_tls(
+                insecure,
+                tls_fingerprint,
+                tls_ca,
+                tls_cert,
+                tls_key,
+                tls_server_name,
+            ) {
                 Ok(t) => t,
                 Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
             };

@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::common::tls::{cert_sha256, format_fingerprint, ClientTlsConfig, ServerTlsConfig};
 
-static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
+static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"]; // TODO: change to h3
 
 pub fn create_server_endpoint(host: IpAddr, port: u16, tls: &ServerTlsConfig) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
@@ -51,12 +51,7 @@ fn load_server_identity(
         }
         ServerTlsConfig::SelfSigned { state_dir } => load_or_create_self_signed(state_dir)?,
         ServerTlsConfig::Provided { cert, key } => load_pem_identity(cert, key)?,
-        // Implemented in a follow-up PR.
-        ServerTlsConfig::Mtls { .. } => {
-            return Err(anyhow!(
-                "mTLS server mode is not implemented yet; use --tls-self-signed or --tls-cert/--tls-key for now"
-            ));
-        }
+        ServerTlsConfig::Mtls { cert, key, .. } => load_pem_identity(cert, key)?,
     };
 
     if let Some(leaf) = cert_chain.first() {
@@ -117,15 +112,7 @@ fn load_pem_identity(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    let cert_pem = fs::read(cert_path)
-        .with_context(|| format!("failed to read cert file {}", cert_path.display()))?;
-    let mut cert_reader = std::io::BufReader::new(cert_pem.as_slice());
-    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<std::result::Result<_, _>>()
-        .with_context(|| format!("failed to parse PEM certs in {}", cert_path.display()))?;
-    if cert_chain.is_empty() {
-        return Err(anyhow!("no certificates found in {}", cert_path.display()));
-    }
+    let cert_chain = load_pem_certs(cert_path)?;
 
     let key_pem = fs::read(key_path)
         .with_context(|| format!("failed to read key file {}", key_path.display()))?;
@@ -135,6 +122,38 @@ fn load_pem_identity(
         .ok_or_else(|| anyhow!("no private key found in {}", key_path.display()))?;
 
     Ok((cert_chain, key))
+}
+
+/// Load all PEM-encoded certificates from `path`. Useful for CA bundles, which
+/// may contain multiple certs.
+fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let pem =
+        fs::read(path).with_context(|| format!("failed to read cert file {}", path.display()))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("failed to parse PEM certs in {}", path.display()))?;
+    if certs.is_empty() {
+        return Err(anyhow!("no certificates found in {}", path.display()));
+    }
+    Ok(certs)
+}
+
+/// Build a `RootCertStore` from a CA bundle on disk.
+fn load_root_store(ca_path: &Path) -> Result<rustls::RootCertStore> {
+    let mut roots = rustls::RootCertStore::empty();
+    let mut added = 0usize;
+    for cert in load_pem_certs(ca_path)? {
+        roots.add(cert).with_context(|| {
+            format!(
+                "failed to add CA cert from {} to root store",
+                ca_path.display()
+            )
+        })?;
+        added += 1;
+    }
+    debug!("loaded {added} CA cert(s) from {}", ca_path.display());
+    Ok(roots)
 }
 
 /// Write a file containing secret material. On unix, sets mode 0600 so the
@@ -162,10 +181,18 @@ fn build_quic_server_config(
         | ServerTlsConfig::Provided { .. } => TlsServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(cert, key)?,
-        ServerTlsConfig::Mtls { .. } => {
-            return Err(anyhow!(
-                "mTLS server mode is not implemented yet; use --insecure for now"
-            ))
+        ServerTlsConfig::Mtls { ca, .. } => {
+            info!(
+                "mTLS enabled: requiring client certificates signed by {}",
+                ca.display()
+            );
+            let roots = load_root_store(ca)?;
+            let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .context("failed to build client cert verifier")?;
+            TlsServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(cert, key)?
         }
     };
 
@@ -191,10 +218,25 @@ fn build_quic_client_config(tls: &ClientTlsConfig) -> Result<ClientConfig> {
             .dangerous()
             .with_custom_certificate_verifier(FingerprintVerifier::new(*sha256))
             .with_no_client_auth(),
-        ClientTlsConfig::Ca { .. } | ClientTlsConfig::Mtls { .. } => {
-            return Err(anyhow!(
-                "CA-based and mTLS client modes are not implemented yet"
-            ))
+        ClientTlsConfig::Ca { ca, .. } => {
+            let roots = load_root_store(ca)?;
+            TlsClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        }
+        ClientTlsConfig::Mtls { ca, cert, key, .. } => {
+            let roots = load_root_store(ca)?;
+            let (cert_chain, key) = load_pem_identity(cert, key)?;
+            if let Some(leaf) = cert_chain.first() {
+                debug!(
+                    "client cert fingerprint: {}",
+                    format_fingerprint(&cert_sha256(leaf))
+                );
+            }
+            TlsClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(cert_chain, key)
+                .context("failed to install client auth cert")?
         }
     };
 
