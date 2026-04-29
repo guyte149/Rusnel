@@ -1,89 +1,21 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::FromStr;
-use std::sync::Once;
-use std::time::Duration;
+//! Basic per-tunnel-type smoke tests.
+//!
+//! These cover the happy path for each tunnel mode (TCP/UDP, forward/reverse,
+//! SOCKS5) and a multi-remote configuration. More involved scenarios live in
+//! sibling test files (see `large_transfer`, `concurrent`, `combinations`,
+//! `edge_cases`).
 
+mod common;
+
+use std::str::FromStr;
+
+use common::{
+    get_available_port, get_available_udp_port, socks5_connect_ipv4, start_tunnel, TEST_TIMEOUT,
+};
 use rusnel::common::remote::RemoteRequest;
-use rusnel::{ClientConfig, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
-
-const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-const STARTUP_DELAY: Duration = Duration::from_millis(500);
-
-static INIT: Once = Once::new();
-
-fn init_crypto() {
-    INIT.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("Failed to install rustls crypto provider");
-    });
-}
-
-fn get_available_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-fn get_available_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    socket.local_addr().unwrap().port()
-}
-
-fn server_config(port: u16, allow_reverse: bool) -> ServerConfig {
-    ServerConfig {
-        host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        port,
-        allow_reverse,
-    }
-}
-
-fn client_config(server_port: u16, remotes: Vec<RemoteRequest>) -> ClientConfig {
-    ClientConfig {
-        server: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server_port),
-        remotes,
-    }
-}
-
-struct TestEnv {
-    server_handle: tokio::task::JoinHandle<()>,
-    client_handle: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for TestEnv {
-    fn drop(&mut self) {
-        self.server_handle.abort();
-        self.client_handle.abort();
-    }
-}
-
-async fn start_tunnel(
-    server_port: u16,
-    allow_reverse: bool,
-    remotes: Vec<RemoteRequest>,
-) -> TestEnv {
-    init_crypto();
-    let sc = server_config(server_port, allow_reverse);
-    let server_handle = tokio::spawn(async move {
-        let _ = rusnel::server::run_async(sc).await;
-    });
-
-    tokio::time::sleep(STARTUP_DELAY).await;
-
-    let cc = client_config(server_port, remotes);
-    let client_handle = tokio::spawn(async move {
-        let _ = rusnel::client::run_async(cc).await;
-    });
-
-    tokio::time::sleep(STARTUP_DELAY).await;
-
-    TestEnv {
-        server_handle,
-        client_handle,
-    }
-}
 
 #[tokio::test]
 async fn test_tcp_forward() {
@@ -143,7 +75,6 @@ async fn test_tcp_forward_bidirectional() {
 
         let (mut target_stream, _) = target_listener.accept().await.unwrap();
 
-        // Client -> Target
         let request = b"GET /data HTTP/1.0\r\n\r\n";
         client_conn.write_all(request).await.unwrap();
 
@@ -151,7 +82,6 @@ async fn test_tcp_forward_bidirectional() {
         let n = target_stream.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], request.as_slice());
 
-        // Target -> Client
         let response = b"HTTP/1.0 200 OK\r\n\r\nresponse body";
         target_stream.write_all(response).await.unwrap();
         target_stream.shutdown().await.unwrap();
@@ -171,7 +101,6 @@ async fn test_tcp_reverse() {
         let listen_port = get_available_port();
         let target_port = get_available_port();
 
-        // Target service on client side
         let target_listener = TcpListener::bind(format!("127.0.0.1:{target_port}"))
             .await
             .unwrap();
@@ -183,7 +112,6 @@ async fn test_tcp_reverse() {
 
         let _env = start_tunnel(server_port, true, vec![remote]).await;
 
-        // Connect to the reverse-forwarded port
         let mut client_conn = TcpStream::connect(format!("127.0.0.1:{listen_port}"))
             .await
             .unwrap();
@@ -283,34 +211,13 @@ async fn test_socks5_forward() {
 
         let _env = start_tunnel(server_port, false, vec![remote]).await;
 
-        // Perform SOCKS5 handshake
-        let mut socks_conn = TcpStream::connect(format!("127.0.0.1:{socks_port}"))
-            .await
-            .unwrap();
+        let mut socks_conn = socks5_connect_ipv4(
+            &format!("127.0.0.1:{socks_port}"),
+            [127, 0, 0, 1],
+            target_port,
+        )
+        .await;
 
-        // Greeting: version 5, 1 method (no auth)
-        socks_conn.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
-        let mut resp = [0u8; 2];
-        socks_conn.read_exact(&mut resp).await.unwrap();
-        assert_eq!(resp, [0x05, 0x00]); // no auth selected
-
-        // CONNECT request to 127.0.0.1:target_port
-        let mut connect_req = vec![
-            0x05, // version
-            0x01, // CONNECT
-            0x00, // reserved
-            0x01, // IPv4
-            127, 0, 0, 1,
-        ];
-        connect_req.extend_from_slice(&target_port.to_be_bytes());
-        socks_conn.write_all(&connect_req).await.unwrap();
-
-        let mut resp = [0u8; 10];
-        socks_conn.read_exact(&mut resp).await.unwrap();
-        assert_eq!(resp[0], 0x05); // version
-        assert_eq!(resp[1], 0x00); // success
-
-        // Send data through SOCKS tunnel
         let test_data = b"hello through socks5 proxy";
         socks_conn.write_all(test_data).await.unwrap();
         socks_conn.shutdown().await.unwrap();
@@ -353,7 +260,6 @@ async fn test_multiple_tcp_remotes() {
 
         let _env = start_tunnel(server_port, false, remotes).await;
 
-        // Test first tunnel
         let mut conn1 = TcpStream::connect(format!("127.0.0.1:{local_port_1}"))
             .await
             .unwrap();
@@ -367,7 +273,6 @@ async fn test_multiple_tcp_remotes() {
         let n = target_stream_1.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], data1);
 
-        // Test second tunnel
         let mut conn2 = TcpStream::connect(format!("127.0.0.1:{local_port_2}"))
             .await
             .unwrap();

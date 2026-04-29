@@ -6,7 +6,6 @@ use tracing::{error, info};
 
 pub mod client;
 pub mod common;
-pub mod macros;
 pub mod server;
 
 #[derive(Debug)]

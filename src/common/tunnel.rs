@@ -1,42 +1,66 @@
-use anyhow::{anyhow, Result};
+//! Length-prefixed control plane on top of QUIC bi-streams.
+//!
+//! QUIC streams are byte-oriented, so any control message exchanged on a
+//! stream must carry its own framing. We use a tiny `u32` little-endian
+//! length prefix followed by a JSON body (kept as JSON for now to limit the
+//! blast radius of this change — see issue #21 for a binary codec).
+
+use anyhow::{anyhow, Context, Result};
 use quinn::{RecvStream, SendStream};
 use tracing::debug;
 
 use crate::common::remote::RemoteResponse;
 use crate::common::utils::SerdeHelper;
-use crate::verbose;
 
 use super::remote::RemoteRequest;
+
+/// Hard cap on a single control message body. Generous compared to anything
+/// the protocol actually sends today, but small enough that a malicious peer
+/// can't make us allocate gigabytes by lying about the length.
+const MAX_CONTROL_MSG: usize = 64 * 1024;
+
+async fn write_framed<T: SerdeHelper>(send: &mut SendStream, msg: &T) -> Result<()> {
+    let body = msg.to_bytes()?;
+    let len = u32::try_from(body.len()).context("control message exceeds u32::MAX")?;
+    send.write_all(&len.to_le_bytes()).await?;
+    send.write_all(&body).await?;
+    Ok(())
+}
+
+async fn read_framed<T: SerdeHelper>(recv: &mut RecvStream) -> Result<T> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| anyhow!("failed to read control message length: {e}"))?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_CONTROL_MSG {
+        return Err(anyhow!(
+            "control message length {len} exceeds cap of {MAX_CONTROL_MSG}"
+        ));
+    }
+    let mut body = vec![0u8; len];
+    recv.read_exact(&mut body)
+        .await
+        .map_err(|e| anyhow!("failed to read control message body: {e}"))?;
+    T::from_bytes(body)
+}
 
 pub async fn client_send_remote_request(
     remote: &RemoteRequest,
     send_channel: &mut SendStream,
     recv_channel: &mut RecvStream,
 ) -> Result<()> {
-    // Send remote request to Rusnel server
-    debug!("Sending remote request to server: {:?}", remote);
-    let serialized = remote.to_json()?;
-    send_channel.write_all(serialized.as_bytes()).await?;
+    debug!("sending remote request");
+    write_framed(send_channel, remote).await?;
 
-    // Receive remote response
-    let mut buffer = [0u8; 1024];
-    let n = recv_channel
-        .read(&mut buffer)
-        .await?
-        .ok_or_else(|| anyhow!("Connection closed before receiving response"))?;
-    let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
-
-    // validate remote response
+    let response: RemoteResponse = read_framed(recv_channel).await?;
     match response {
-        RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error: {}", err)),
-        _ => {
-            debug!("remote response {:?}", response)
+        RemoteResponse::RemoteFailed(err) => Err(anyhow!("Remote tunnel error: {}", err)),
+        RemoteResponse::RemoteOk => {
+            debug!("remote accepted");
+            Ok(())
         }
     }
-
-    debug!("Created remote stream: {:?}", remote);
-
-    Ok(())
 }
 
 pub async fn server_receive_remote_request(
@@ -44,55 +68,16 @@ pub async fn server_receive_remote_request(
     recv_channel: &mut RecvStream,
     allow_reverse: bool,
 ) -> Result<RemoteRequest> {
-    // Read remote request from Rusnel client
-    let mut buffer = [0; 1024];
-    let n = recv_channel
-        .read(&mut buffer)
-        .await?
-        .ok_or_else(|| anyhow!("Connection closed before receiving request"))?;
-    let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
-
-    verbose!("Received remote request: {:?}", request);
+    let request: RemoteRequest = read_framed(recv_channel).await?;
+    debug!("received remote request: {}", request);
 
     if request.reversed && !allow_reverse {
         let response =
             RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
-        send_channel
-            .write_all(response.to_json()?.as_bytes())
-            .await?;
+        write_framed(send_channel, &response).await?;
         return Err(anyhow!("Reverse remotes are not allowed"));
     }
 
-    let response = RemoteResponse::RemoteOk;
-    debug!("sending remote response to client {:?}", response);
-    send_channel
-        .write_all(response.to_json()?.as_bytes())
-        .await?;
+    write_framed(send_channel, &RemoteResponse::RemoteOk).await?;
     Ok(request)
-}
-
-pub async fn client_send_remote_start(
-    send_channel: &mut SendStream,
-    remote: RemoteRequest,
-) -> Result<()> {
-    let remote_start = "remote_start".as_bytes();
-    debug!("sending remote start to server");
-    send_channel.write_all(remote_start).await?;
-
-    verbose!("Starting remote stream to: {:?}", remote);
-
-    // TODO - maybe validate server "remoted started"
-    Ok(())
-}
-
-pub async fn server_receive_remote_start(recv_channel: &mut RecvStream) -> Result<()> {
-    let mut buffer = [0u8; 1024];
-    let n: usize = recv_channel
-        .read(&mut buffer)
-        .await?
-        .ok_or_else(|| anyhow!("Connection closed before receiving remote start"))?;
-    let start: String = String::from_utf8_lossy(&buffer[..n]).into();
-
-    debug!("Received remote start command: {}", start);
-    Ok(())
 }

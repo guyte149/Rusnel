@@ -1,6 +1,7 @@
 use crate::common::utils::SerdeHelper;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::{net::IpAddr, str::FromStr};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -195,6 +196,32 @@ impl FromStr for RemoteRequest {
     }
 }
 
+impl fmt::Display for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Protocol::Tcp => write!(f, "tcp"),
+            Protocol::Udp => write!(f, "udp"),
+        }
+    }
+}
+
+impl fmt::Display for RemoteRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.reversed {
+            write!(f, "R:")?;
+        }
+        if self.remote_host == "socks" {
+            write!(f, "{}=>socks", self.local_port)
+        } else {
+            write!(
+                f,
+                "{}=>{}:{}/{}",
+                self.local_port, self.remote_host, self.remote_port, self.protocol
+            )
+        }
+    }
+}
+
 impl SerdeHelper for RemoteRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -204,10 +231,3 @@ pub enum RemoteResponse {
 }
 
 impl SerdeHelper for RemoteResponse {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RemoteStart {
-    remote_start: bool,
-}
-
-impl SerdeHelper for RemoteStart {}

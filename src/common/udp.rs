@@ -1,75 +1,225 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
-use tracing::{debug, info};
+use tokio::sync::{mpsc, Mutex};
+use tracing::{debug, info, warn};
 
-use crate::{common::tunnel::client_send_remote_request, verbose};
+use crate::common::tunnel::client_send_remote_request;
 
 use super::remote::RemoteRequest;
 
+/// Max UDP datagram payload we will accept on either side. IPv4 caps a UDP
+/// payload at 65 507 bytes; round up to a power of two for the buffer.
+const MAX_DATAGRAM: usize = 65_535;
+
+/// How long a per-source UDP session may sit idle (no packets in either
+/// direction) before we tear down the QUIC stream and free the entry. Long
+/// enough to outlast typical request/response patterns; short enough that
+/// `HashMap` doesn't grow unbounded under churn.
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound on per-session backpressure. UDP is unreliable, so on overflow we
+/// drop the datagram (with a debug log) rather than block the receive loop.
+/// Sized generously to absorb traffic bursts during the initial RTT it takes
+/// to open the per-source QUIC stream.
+const SESSION_CHANNEL_CAPACITY: usize = 4096;
+
+/// Frame one UDP datagram onto a QUIC stream as `u16 length + bytes`. Without
+/// this prefix consecutive datagrams coalesce into a single far-side read and
+/// get re-emitted as one oversized datagram (see issue #18 §3).
+async fn write_datagram(send: &mut SendStream, payload: &[u8]) -> Result<()> {
+    let len = u16::try_from(payload.len())
+        .map_err(|_| anyhow!("UDP datagram of {} bytes exceeds 65535", payload.len()))?;
+    send.write_all(&len.to_le_bytes()).await?;
+    send.write_all(payload).await?;
+    Ok(())
+}
+
+/// Read one length-prefixed datagram into `buf`, returning the slice that
+/// holds the actual payload. `buf` must be at least `MAX_DATAGRAM` bytes.
+async fn read_datagram<'a>(recv: &mut RecvStream, buf: &'a mut [u8]) -> Result<&'a [u8]> {
+    let mut len_buf = [0u8; 2];
+    recv.read_exact(&mut len_buf).await?;
+    let len = u16::from_le_bytes(len_buf) as usize;
+    if len > buf.len() {
+        return Err(anyhow!(
+            "datagram length {} exceeds local buffer {}",
+            len,
+            buf.len()
+        ));
+    }
+    recv.read_exact(&mut buf[..len]).await?;
+    Ok(&buf[..len])
+}
+
+/// Server-side: pair a single QUIC stream with a freshly bound UDP socket
+/// and shuttle datagrams between them. Used both for forward UDP (server end
+/// of `tunnel_udp_server`) and for the per-source sessions on the reverse
+/// path. The `udp_address` is the *peer* we're talking to on the UDP side
+/// (either the upstream target on the server, or the local app on the
+/// client).
 pub async fn tunnel_udp_stream(
     udp_socket: Arc<UdpSocket>,
     udp_address: SocketAddr,
     mut send_channel: SendStream,
     mut recv_channel: RecvStream,
 ) -> Result<()> {
-    let client_to_server = async {
-        let mut buf = vec![0u8; 1024];
+    let socket_for_recv = udp_socket.clone();
+    let local_to_quic = async move {
+        let mut buf = vec![0u8; MAX_DATAGRAM];
         loop {
-            let (len, received_addr) = udp_socket.recv_from(&mut buf).await?;
-            // validate that the received packet is from the correct application.
-            if received_addr == udp_address {
-                send_channel.write_all(&buf[..len]).await?;
+            let (len, received_addr) = socket_for_recv.recv_from(&mut buf).await?;
+            if received_addr != udp_address {
+                debug!(peer = %received_addr, expected = %udp_address, "dropping datagram from unexpected source");
+                continue;
             }
+            write_datagram(&mut send_channel, &buf[..len]).await?;
         }
         #[allow(unreachable_code)]
-        Ok::<(), tokio::io::Error>(())
+        Ok::<(), anyhow::Error>(())
     };
 
-    let server_to_client = async {
-        let mut buf = vec![0u8; 1024];
+    let quic_to_local = async move {
+        let mut buf = vec![0u8; MAX_DATAGRAM];
         loop {
-            let len = recv_channel
-                .read(&mut buf)
-                .await?
-                .ok_or(tokio::io::Error::new(
-                    tokio::io::ErrorKind::UnexpectedEof,
-                    "stream closed",
-                ))?;
-            udp_socket.send_to(&buf[..len], &udp_address).await?;
+            let payload = read_datagram(&mut recv_channel, &mut buf).await?;
+            udp_socket.send_to(payload, &udp_address).await?;
         }
         #[allow(unreachable_code)]
-        Ok::<(), tokio::io::Error>(())
+        Ok::<(), anyhow::Error>(())
     };
 
-    match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => verbose!("Finished udp tunnel"),
-        Err(e) => eprintln!("Failed to forward: {}", e),
-    };
-    Ok::<(), anyhow::Error>(())
+    // tokio::join! (not try_join!) so a write error in one direction does not
+    // cancel an in-flight read in the other (#20 §3). UDP is unreliable so we
+    // just log and let the connection close.
+    let (l2q, q2l) = tokio::join!(local_to_quic, quic_to_local);
+    if let Err(e) = l2q {
+        debug!("local→quic error: {}", e);
+    }
+    if let Err(e) = q2l {
+        debug!("quic→local error: {}", e);
+    }
+    Ok(())
 }
 
+/// Client-side forward UDP: accept datagrams from any number of local
+/// senders and multiplex each source onto its own QUIC bi-stream. Sessions
+/// are torn down after `SESSION_IDLE_TIMEOUT` of inactivity.
 pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let udp_socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
 
-    info!("UDP tunnel listening on: {}", listen_addr);
+    info!("listening on {}", listen_addr);
 
+    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    loop {
+        let (n, src) = udp_socket.recv_from(&mut buf).await?;
+        let payload = buf[..n].to_vec();
+
+        // Look up an existing session, or open a new one for this source.
+        let sender = {
+            let mut map = sessions.lock().await;
+            // Drop the entry if its session has already terminated.
+            if let Some(tx) = map.get(&src) {
+                if tx.is_closed() {
+                    map.remove(&src);
+                }
+            }
+            if let Some(tx) = map.get(&src) {
+                tx.clone()
+            } else {
+                let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
+                map.insert(src, tx.clone());
+                spawn_udp_session(
+                    quic_connection.clone(),
+                    remote.clone(),
+                    udp_socket.clone(),
+                    src,
+                    rx,
+                    sessions.clone(),
+                );
+                tx
+            }
+        };
+
+        // UDP is unreliable — if the session is backpressured or has already
+        // terminated, dropping the packet is correct.
+        if let Err(e) = sender.try_send(payload) {
+            debug!(peer = %src, "dropping UDP datagram: {}", e);
+        }
+    }
+}
+
+fn spawn_udp_session(
+    quic_connection: Connection,
+    remote: RemoteRequest,
+    udp_socket: Arc<UdpSocket>,
+    source: SocketAddr,
+    rx: mpsc::Receiver<Vec<u8>>,
+    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>>,
+) {
+    tokio::spawn(async move {
+        debug!(peer = %source, "opening UDP session");
+        if let Err(e) = run_udp_session(quic_connection, remote, udp_socket, source, rx).await {
+            warn!(peer = %source, "UDP session ended: {}", e);
+        }
+        sessions.lock().await.remove(&source);
+        debug!(peer = %source, "UDP session removed");
+    });
+}
+
+async fn run_udp_session(
+    quic_connection: Connection,
+    remote: RemoteRequest,
+    udp_socket: Arc<UdpSocket>,
+    source: SocketAddr,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+) -> Result<()> {
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
     client_send_remote_request(&remote, &mut send_channel, &mut recv_channel).await?;
 
-    let mut buffer = [0u8; 1024];
-    let (n, local_conn_addr) = udp_socket.recv_from(&mut buffer).await?;
+    // Forward locally-received datagrams onto the QUIC stream until the local
+    // sender goes silent for SESSION_IDLE_TIMEOUT.
+    let local_to_quic = async {
+        loop {
+            match tokio::time::timeout(SESSION_IDLE_TIMEOUT, rx.recv()).await {
+                Ok(Some(payload)) => write_datagram(&mut send_channel, &payload).await?,
+                Ok(None) => return Ok(()), // sender side closed
+                Err(_) => {
+                    debug!(peer = %source, "UDP session idle timeout");
+                    return Ok(());
+                }
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
 
-    verbose!("received UDP connection from: {}", local_conn_addr);
+    // Forward replies from the QUIC stream back to the original local sender.
+    let quic_to_local = async {
+        let mut buf = vec![0u8; MAX_DATAGRAM];
+        loop {
+            let payload = read_datagram(&mut recv_channel, &mut buf).await?;
+            udp_socket.send_to(payload, &source).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
 
-    send_channel.write_all(&buffer[..n]).await?;
-
-    tunnel_udp_stream(udp_socket, local_conn_addr, send_channel, recv_channel).await?;
-    Ok(())
+    // Either branch finishing tears the session down — UDP has no "half-close"
+    // worth preserving here.
+    tokio::select! {
+        r = local_to_quic => r,
+        r = quic_to_local => r,
+    }
 }
 
 pub async fn tunnel_udp_server(
@@ -83,7 +233,7 @@ pub async fn tunnel_udp_server(
 
     let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
-    debug!("connecting to remote UDP: {}", remote_addr);
+    debug!("connecting to {}", remote_addr);
 
     tunnel_udp_stream(udp_socket, remote_addr, send_channel, recv_channel).await?;
 
