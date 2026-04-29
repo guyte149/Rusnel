@@ -122,5 +122,8 @@ Options:
 - [ ] add server tls certificate verificatin
 - [ ] add mutual tls verification
 - [ ] add fake-beckend http/3 feature to server
+- [ ] disguise traffic as HTTP/3 to bypass DPI firewalls (ALPN `h3`, default UDP/443, configurable SNI, RFC 9000 QUIC version, optionally CA-signed cert and minimal HTTP/3 facade for active probes)
 - [ ] client reconnect
+- [ ] benchmark performance against chisel (and other tunnel tools, e.g. wstunnel, frp)
+- [ ] support UDP over SOCKS5 (UDP ASSOCIATE — currently only CONNECT/TCP is implemented)
 
