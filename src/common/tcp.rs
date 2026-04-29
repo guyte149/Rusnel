@@ -31,11 +31,16 @@ pub async fn tunnel_tcp_stream(
         Ok::<(), anyhow::Error>(())
     };
 
-    match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => debug!("closed"),
-        Err(e) => debug!("forward error: {}", e),
-    };
-    Ok::<(), anyhow::Error>(())
+    // tokio::join! (not try_join!) so that an error in one direction doesn't
+    // cancel an in-flight copy in the other and silently lose buffered bytes
+    // (#20 §3). The application has already half-closed appropriately.
+    let (c2s, s2c) = tokio::join!(client_to_server, server_to_client);
+    match (&c2s, &s2c) {
+        (Ok(_), Ok(_)) => debug!("closed"),
+        (Err(e), _) => debug!("client→server error: {}", e),
+        (_, Err(e)) => debug!("server→client error: {}", e),
+    }
+    Ok(())
 }
 
 pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {

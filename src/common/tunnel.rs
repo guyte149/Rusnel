@@ -20,7 +20,7 @@ use super::remote::RemoteRequest;
 const MAX_CONTROL_MSG: usize = 64 * 1024;
 
 async fn write_framed<T: SerdeHelper>(send: &mut SendStream, msg: &T) -> Result<()> {
-    let body = msg.to_json()?.into_bytes();
+    let body = msg.to_bytes()?;
     let len = u32::try_from(body.len()).context("control message exceeds u32::MAX")?;
     send.write_all(&len.to_le_bytes()).await?;
     send.write_all(&body).await?;

@@ -27,41 +27,36 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
         let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed) + 1;
         let span = debug_span!("conn", id = conn_id, peer = %peer_addr);
 
+        // Fire-and-forget: each accepted SOCKS5 connection runs to completion
+        // in its own task so the accept loop never blocks on a slow handshake
+        // (regression of #20 §1).
         tokio::spawn(
             async move {
-                let dynamic_remote = socks_handshake(&mut local_conn, &remote).await;
-                match dynamic_remote {
-                    Err(e) => error!("handshake error: {}", e),
-                    Ok(dynamic_remote) => {
-                        debug!(target_remote = %dynamic_remote, "SOCKS5 connect");
-                        tokio::spawn(async move {
-                            let (send, recv) = match connection.open_bi().await {
-                                Ok(stream) => stream,
-                                Err(e) => {
-                                    error!("failed to open stream: {}", e);
-                                    return;
-                                }
-                            };
-                            match start_client_dynamic_tunnel(
-                                local_conn,
-                                send,
-                                recv,
-                                dynamic_remote,
-                            )
-                            .await
-                            {
-                                Ok(()) => (),
-                                Err(e) => {
-                                    error!("dynamic tunnel error: {}", e);
-                                }
-                            };
-                        });
+                let dynamic_remote = match socks_handshake(&mut local_conn, &remote).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("handshake error: {}", e);
+                        return;
                     }
+                };
+                debug!(target_remote = %dynamic_remote, "SOCKS5 connect");
+
+                let (send, recv) = match connection.open_bi().await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        error!("failed to open stream: {}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) =
+                    start_client_dynamic_tunnel(local_conn, send, recv, dynamic_remote).await
+                {
+                    error!("dynamic tunnel error: {}", e);
                 }
             }
             .instrument(span),
-        )
-        .await?;
+        );
     }
 }
 
@@ -82,7 +77,6 @@ async fn start_client_dynamic_tunnel(
     Ok(())
 }
 
-// TODO - support udp over socks5 :)
 async fn socks_handshake(
     conn: &mut TcpStream,
     original_remote: &RemoteRequest,

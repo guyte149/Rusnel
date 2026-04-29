@@ -94,10 +94,16 @@ pub async fn tunnel_udp_stream(
         Ok::<(), anyhow::Error>(())
     };
 
-    match tokio::try_join!(local_to_quic, quic_to_local) {
-        Ok(_) => debug!("closed"),
-        Err(e) => debug!("forward error: {}", e),
-    };
+    // tokio::join! (not try_join!) so a write error in one direction does not
+    // cancel an in-flight read in the other (#20 §3). UDP is unreliable so we
+    // just log and let the connection close.
+    let (l2q, q2l) = tokio::join!(local_to_quic, quic_to_local);
+    if let Err(e) = l2q {
+        debug!("local→quic error: {}", e);
+    }
+    if let Err(e) = q2l {
+        debug!("quic→local error: {}", e);
+    }
     Ok(())
 }
 
