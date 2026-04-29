@@ -276,9 +276,9 @@ pub fn client_server_name(tls: &ClientTlsConfig, server_host: &str) -> String {
         ClientTlsConfig::Insecure => server_host.to_string(),
         ClientTlsConfig::Fingerprint { server_name, .. }
         | ClientTlsConfig::Ca { server_name, .. }
-        | ClientTlsConfig::Mtls { server_name, .. } => {
-            server_name.clone().unwrap_or_else(|| server_host.to_string())
-        }
+        | ClientTlsConfig::Mtls { server_name, .. } => server_name
+            .clone()
+            .unwrap_or_else(|| server_host.to_string()),
     }
 }
 
