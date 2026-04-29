@@ -1,14 +1,15 @@
 use clap::crate_version;
 use clap::error::ErrorKind;
-use clap::{ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand};
+use clap::{Args as ClapArgs, CommandFactory, Parser, Subcommand};
 use rusnel::cert;
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
+use rusnel::embedded::{self, Materialized};
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::str::FromStr;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Resolve `host:port` to a `SocketAddr`. Used as a clap `value_parser` so
 /// resolution failures surface as `clap::Error` (consistent formatting +
@@ -38,11 +39,11 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Mode {
     /// run Rusnel in server mode
-    #[command(group(
-        ArgGroup::new("server_tls_mode")
-            .required(true)
-            .args(["insecure", "tls_self_signed", "tls_cert"]),
-    ))]
+    ///
+    /// Exactly one of --insecure, --tls-self-signed, or --tls-cert/--tls-key
+    /// must be set, unless the binary was built with embedded server
+    /// credentials (see RUSNEL_EMBED_* in build.rs), in which case those are
+    /// used as the default.
     #[allow(clippy::too_many_arguments)]
     Server {
         /// defines Rusnel listening host (the network interface)
@@ -98,11 +99,10 @@ enum Mode {
         is_debug: bool,
     },
     /// run Rusnel in client mode
-    #[command(group(
-        ArgGroup::new("client_tls_mode")
-            .required(true)
-            .args(["insecure", "tls_fingerprint", "tls_ca"]),
-    ))]
+    ///
+    /// Exactly one of --insecure, --tls-fingerprint, or --tls-ca must be set,
+    /// unless the binary was built with embedded client credentials, in which
+    /// case those are used as the default.
     #[allow(clippy::too_many_arguments)]
     Client {
         /// defines the Rusnel server address (in form of host:port)
@@ -270,8 +270,12 @@ struct ClientCertArgs {
     file_stem: Option<String>,
 }
 
-/// Resolve the server CLI flags into a [`ServerTlsConfig`]. Clap's `ArgGroup`
-/// already guarantees exactly one mode flag is set, so this is just a mapping.
+/// Resolve the server CLI flags into a [`ServerTlsConfig`]. CLI flags take
+/// precedence; if none are set, we try to use any embedded credentials baked
+/// in by build.rs. If neither path applies, error with a clear message —
+/// honouring the "require explicit" decision: either the operator explicitly
+/// chose a mode at runtime, or the build was explicitly configured with
+/// embedded creds.
 fn resolve_server_tls(
     insecure: bool,
     tls_self_signed: bool,
@@ -279,6 +283,7 @@ fn resolve_server_tls(
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     tls_ca: Option<PathBuf>,
+    embedded: &Materialized,
 ) -> Result<ServerTlsConfig, String> {
     if insecure {
         return Ok(ServerTlsConfig::Insecure);
@@ -290,13 +295,32 @@ fn resolve_server_tls(
         };
         return Ok(ServerTlsConfig::SelfSigned { state_dir });
     }
-    match (tls_cert, tls_key, tls_ca) {
-        (Some(cert), Some(key), Some(ca)) => Ok(ServerTlsConfig::Mtls { cert, key, ca }),
-        (Some(cert), Some(key), None) => Ok(ServerTlsConfig::Provided { cert, key }),
-        // Unreachable in practice: clap's `requires` enforces the pairing and
-        // the ArgGroup guarantees one mode is selected.
-        _ => Err("internal error: TLS mode flags not validated correctly".into()),
+
+    // Explicit --tls-cert/--tls-key (clap enforces both-or-neither). If only
+    // one of cert/key is present here the user mis-configured something we
+    // can't recover from — clap should have caught it.
+    if let (Some(cert), Some(key)) = (tls_cert.clone(), tls_key.clone()) {
+        return Ok(match tls_ca {
+            Some(ca) => ServerTlsConfig::Mtls { cert, key, ca },
+            None => ServerTlsConfig::Provided { cert, key },
+        });
     }
+
+    // No CLI flags. Fall back to embedded creds.
+    if let (Some(cert), Some(key)) = (embedded.server_cert.clone(), embedded.server_key.clone()) {
+        info!("using embedded server credentials baked in at build time");
+        return Ok(match embedded.ca.clone() {
+            Some(ca) => ServerTlsConfig::Mtls { cert, key, ca },
+            None => ServerTlsConfig::Provided { cert, key },
+        });
+    }
+
+    Err(
+        "no TLS mode specified. Pass one of --insecure, --tls-self-signed, \
+         --tls-cert + --tls-key (with optional --tls-ca for mTLS), or build \
+         with RUSNEL_EMBED_SERVER_CERT / RUSNEL_EMBED_SERVER_KEY."
+            .into(),
+    )
 }
 
 /// Default state dir for persisted self-signed certs: `~/.rusnel`.
@@ -313,16 +337,20 @@ fn resolve_client_tls(
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     tls_server_name: Option<String>,
+    embedded: &Materialized,
 ) -> Result<ClientTlsConfig, String> {
     if insecure {
         return Ok(ClientTlsConfig::Insecure);
     }
+
+    let embedded_server_name = || embedded::EMBED_SERVER_NAME.map(|s| s.to_string());
+
     if let Some(raw) = tls_fingerprint {
         let sha256 = parse_fingerprint(&raw)
             .map_err(|e| format!("invalid --tls-fingerprint value `{raw}`: {e}"))?;
         return Ok(ClientTlsConfig::Fingerprint {
             sha256,
-            server_name: tls_server_name,
+            server_name: tls_server_name.or_else(embedded_server_name),
         });
     }
     if let Some(ca) = tls_ca {
@@ -331,15 +359,53 @@ fn resolve_client_tls(
                 ca,
                 cert,
                 key,
-                server_name: tls_server_name,
+                server_name: tls_server_name.or_else(embedded_server_name),
             },
             _ => ClientTlsConfig::Ca {
                 ca,
-                server_name: tls_server_name,
+                server_name: tls_server_name.or_else(embedded_server_name),
             },
         });
     }
-    Err("internal error: client TLS mode flags not validated correctly".into())
+
+    // No CLI flags. Fall back to embedded creds in this priority order:
+    //   1. embedded CA + client cert/key  → mTLS
+    //   2. embedded CA only               → CA-only verification
+    //   3. embedded fingerprint           → fingerprint pinning
+    if let Some(ca) = embedded.ca.clone() {
+        info!("using embedded client credentials baked in at build time");
+        return Ok(
+            match (embedded.client_cert.clone(), embedded.client_key.clone()) {
+                (Some(cert), Some(key)) => ClientTlsConfig::Mtls {
+                    ca,
+                    cert,
+                    key,
+                    server_name: tls_server_name.or_else(embedded_server_name),
+                },
+                _ => ClientTlsConfig::Ca {
+                    ca,
+                    server_name: tls_server_name.or_else(embedded_server_name),
+                },
+            },
+        );
+    }
+    if let Some(fp) = embedded::EMBED_FINGERPRINT {
+        info!("using embedded server fingerprint baked in at build time");
+        let sha256 = parse_fingerprint(fp).map_err(|e| {
+            format!("invalid embedded fingerprint (RUSNEL_EMBED_FINGERPRINT) `{fp}`: {e}")
+        })?;
+        return Ok(ClientTlsConfig::Fingerprint {
+            sha256,
+            server_name: tls_server_name.or_else(embedded_server_name),
+        });
+    }
+
+    Err(
+        "no TLS mode specified. Pass one of --insecure, --tls-fingerprint, \
+         --tls-ca (with optional --tls-cert + --tls-key for mTLS), or build \
+         with RUSNEL_EMBED_CA / RUSNEL_EMBED_FINGERPRINT."
+            .into(),
+    )
 }
 
 fn main() {
@@ -370,6 +436,16 @@ fn main() {
         } => {
             set_log_level(is_verbose, is_debug);
 
+            let embedded = match embedded::materialize() {
+                Ok(m) => m,
+                Err(e) => Args::command()
+                    .error(
+                        ErrorKind::Io,
+                        format!("failed to materialize embedded credentials: {e:#}"),
+                    )
+                    .exit(),
+            };
+
             let tls = match resolve_server_tls(
                 insecure,
                 tls_self_signed,
@@ -377,6 +453,7 @@ fn main() {
                 tls_cert,
                 tls_key,
                 tls_ca,
+                embedded,
             ) {
                 Ok(t) => t,
                 Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
@@ -405,6 +482,16 @@ fn main() {
         } => {
             set_log_level(is_verbose, is_debug);
 
+            let embedded = match embedded::materialize() {
+                Ok(m) => m,
+                Err(e) => Args::command()
+                    .error(
+                        ErrorKind::Io,
+                        format!("failed to materialize embedded credentials: {e:#}"),
+                    )
+                    .exit(),
+            };
+
             let tls = match resolve_client_tls(
                 insecure,
                 tls_fingerprint,
@@ -412,6 +499,7 @@ fn main() {
                 tls_cert,
                 tls_key,
                 tls_server_name,
+                embedded,
             ) {
                 Ok(t) => t,
                 Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),

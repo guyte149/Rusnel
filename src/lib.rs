@@ -8,6 +8,7 @@ use tracing::{error, info};
 pub mod cert;
 pub mod client;
 pub mod common;
+pub mod embedded;
 pub mod server;
 
 #[derive(Debug)]
