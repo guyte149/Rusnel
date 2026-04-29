@@ -13,9 +13,11 @@ use crate::common::tunnel::{client_send_remote_request, server_receive_remote_re
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{verbose, ClientConfig};
 
-// TODO - refactor this function
-#[tokio::main]
-pub async fn run(config: ClientConfig) -> Result<()> {
+pub fn run(config: ClientConfig) -> Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(run_async(config))
+}
+
+pub async fn run_async(config: ClientConfig) -> Result<()> {
     let endpoint = create_client_endpoint()?;
 
     info!("connecting to server at: {}", config.server);

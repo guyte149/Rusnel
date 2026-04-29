@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 use common::remote::RemoteRequest;
 use std::net::{IpAddr, SocketAddr};
 use tracing::{error, info};

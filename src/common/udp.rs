@@ -32,7 +32,13 @@ pub async fn tunnel_udp_stream(
     let server_to_client = async {
         let mut buf = vec![0u8; 1024];
         loop {
-            let len = recv_channel.read(&mut buf).await?.unwrap();
+            let len = recv_channel
+                .read(&mut buf)
+                .await?
+                .ok_or(tokio::io::Error::new(
+                    tokio::io::ErrorKind::UnexpectedEof,
+                    "stream closed",
+                ))?;
             udp_socket.send_to(&buf[..len], &udp_address).await?;
         }
         #[allow(unreachable_code)]

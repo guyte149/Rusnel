@@ -13,8 +13,11 @@ use crate::common::tunnel::server_receive_remote_request;
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{verbose, ServerConfig};
 
-#[tokio::main]
-pub async fn run(config: ServerConfig) -> Result<()> {
+pub fn run(config: ServerConfig) -> Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(run_async(config))
+}
+
+pub async fn run_async(config: ServerConfig) -> Result<()> {
     let endpoint = create_server_endpoint(config.host, config.port)?;
     info!("Listening on {}", endpoint.local_addr()?);
 

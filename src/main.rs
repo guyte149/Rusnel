@@ -131,7 +131,7 @@ fn main() {
                 .to_socket_addrs()
                 .unwrap_or_else(|_| panic!("Failed to resolve server address: {server}"))
                 .next()
-                .unwrap();
+                .expect("No addresses found for server");
 
             let mut remotes_list: Vec<RemoteRequest> = vec![];
             for remote_str in remotes {
