@@ -140,10 +140,7 @@ mod tests {
     #[test]
     fn fingerprint_accepts_colon_separators() {
         let digest = [0x42u8; 32];
-        let with_colons = std::iter::repeat("42")
-            .take(32)
-            .collect::<Vec<_>>()
-            .join(":");
+        let with_colons = std::iter::repeat_n("42", 32).collect::<Vec<_>>().join(":");
         assert_eq!(parse_fingerprint(&with_colons).unwrap(), digest);
     }
 
