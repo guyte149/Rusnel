@@ -9,6 +9,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version bump check
+        run: |
+          PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          BASE_VERSION=$(git show origin/master:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ "$PR_VERSION" = "$BASE_VERSION" ]; then
+            echo "::error::Version in Cargo.toml ($PR_VERSION) was not bumped from master ($BASE_VERSION)"
+            exit 1
+          fi
+          echo "Version bumped: $BASE_VERSION -> $PR_VERSION"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -20,14 +33,3 @@ jobs:
 
       - name: Test
         run: cargo test --all
-
-      - name: Version bump check
-        run: |
-          PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          git fetch origin master
-          BASE_VERSION=$(git show origin/master:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
-          if [ "$PR_VERSION" = "$BASE_VERSION" ]; then
-            echo "::error::Version in Cargo.toml ($PR_VERSION) was not bumped from master ($BASE_VERSION)"
-            exit 1
-          fi
-          echo "Version bumped: $BASE_VERSION -> $PR_VERSION"
