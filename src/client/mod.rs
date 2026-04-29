@@ -20,12 +20,12 @@ pub fn run(config: ClientConfig) -> Result<()> {
 pub async fn run_async(config: ClientConfig) -> Result<()> {
     let endpoint = create_client_endpoint(&config.tls)?;
 
-    let server_name = client_server_name(&config.tls);
+    let server_name = client_server_name(&config.tls, &config.server.host);
     info!(
         "connecting to server at: {} (sni: {})",
         config.server, server_name
     );
-    let connection_result = endpoint.connect(config.server, &server_name)?.await;
+    let connection_result = endpoint.connect(config.server.addr, &server_name)?.await;
 
     let connection = match connection_result {
         Ok(conn) => {

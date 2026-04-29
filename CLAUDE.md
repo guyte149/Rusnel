@@ -21,7 +21,7 @@ Rusnel is a single-binary TCP/UDP tunneling tool over QUIC. The binary runs as e
 
 ### Core Flow
 
-1. **QUIC transport** (`src/common/quic.rs`): Server generates a self-signed TLS cert at startup. Client skips server cert verification (intentional — proper verification is a TODO). Both use `quinn` with ALPN `hq-29`.
+1. **QUIC transport** (`src/common/quic.rs`): Server generates a self-signed TLS cert at startup. Client skips server cert verification (intentional — proper verification is a TODO). Both use `quinn` with ALPN `h3` (to blend in with HTTP/3 traffic; we don't actually speak HTTP/3).
 
 2. **Remote negotiation** (`src/common/tunnel.rs`): Each tunnel starts with the client opening a QUIC bi-directional stream, sending a JSON-serialized `RemoteRequest`, and receiving a `RemoteResponse`. The server validates the request (e.g., rejects reverse remotes unless `--allow-reverse`).
 
