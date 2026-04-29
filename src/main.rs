@@ -1,11 +1,27 @@
 use clap::crate_version;
-use clap::{Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
-use std::net::{IpAddr, ToSocketAddrs};
-use std::process;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use tracing::debug;
+
+/// Resolve `host:port` to a `SocketAddr`. Used as a clap `value_parser` so
+/// resolution failures surface as `clap::Error` (consistent formatting +
+/// exit code 2) instead of a panic (#20 §4).
+fn parse_server_addr(s: &str) -> Result<SocketAddr, String> {
+    s.to_socket_addrs()
+        .map_err(|e| format!("failed to resolve server address `{s}`: {e}"))?
+        .next()
+        .ok_or_else(|| format!("no addresses found for server `{s}`"))
+}
+
+/// Parse a remote spec via `RemoteRequest::from_str`, surfacing parse errors
+/// as `clap` errors instead of `eprintln! + process::exit` (#20 §4 + §5).
+fn parse_remote(s: &str) -> Result<RemoteRequest, String> {
+    RemoteRequest::from_str(s).map_err(|e| format!("invalid remote `{s}`: {e}"))
+}
 
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
@@ -43,10 +59,10 @@ enum Mode {
     /// run Rusnel in client mode
     Client {
         /// defines the Rusnel server address (in form of host:port)
-        #[arg(value_parser)]
-        server: String,
+        #[arg(value_parser = parse_server_addr)]
+        server: SocketAddr,
 
-        #[arg(name = "remote", required = true , value_delimiter = ' ', num_args = 1.., help=r#"
+        #[arg(name = "remote", required = true, value_parser = parse_remote, value_delimiter = ' ', num_args = 1.., help=r#"
 <remote>s are remote connections tunneled through the server, each which come in the form:
 
     <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
@@ -82,7 +98,7 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
     Remotes can specify "socks" in place of remote-host and remote-port.
     The default local host and port for a "socks" remote is 127.0.0.1:1080.
         "#)]
-        remotes: Vec<String>,
+        remotes: Vec<RemoteRequest>,
 
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
@@ -95,9 +111,14 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
 }
 
 fn main() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+    if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
+        Args::command()
+            .error(
+                ErrorKind::Io,
+                format!("failed to install rustls crypto provider: {e:?}"),
+            )
+            .exit();
+    }
 
     let args = Args::parse();
 
@@ -126,25 +147,8 @@ fn main() {
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
-            let server_addr = server
-                .to_socket_addrs()
-                .unwrap_or_else(|_| panic!("Failed to resolve server address: {server}"))
-                .next()
-                .expect("No addresses found for server");
 
-            let mut remotes_list: Vec<RemoteRequest> = vec![];
-            for remote_str in remotes {
-                let remote = RemoteRequest::from_str(&remote_str).unwrap_or_else(|error| {
-                    eprintln!("Remote parsing error: {}", error);
-                    process::exit(1);
-                });
-                remotes_list.push(remote);
-            }
-
-            let client_config = ClientConfig {
-                server: server_addr,
-                remotes: remotes_list,
-            };
+            let client_config = ClientConfig { server, remotes };
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }
