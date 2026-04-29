@@ -10,11 +10,13 @@ Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC proto
 -   Easy to use
 -   Single executable including both client and server.
 -   Uses QUIC protocol for fast and multiplexed communication.
--   Encrypted connections using the QUIC protocol (Tls1.3)
+-   Encrypted connections using the QUIC protocol (TLS 1.3).
 -   Static forward tunneling (TCP, UDP)
 -   Static reverse tunneling (TCP, UDP)
 -   Dynamic tunneling (socks5)
 -   Dynamic reverse tunneling (reverse socks5)
+-   Layered peer authentication: insecure, fingerprint pinning, or full mTLS
+    (see [Authentication](#authentication)).
 
 
 
@@ -42,6 +44,7 @@ Usage: rusnel <COMMAND>
 Commands:
   server  run Rusnel in server mode
   client  run Rusnel in client mode
+  cert    generate certificates for use with --tls-* flags
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -56,12 +59,18 @@ run Rusnel in server mode
 Usage: rusnel server [OPTIONS]
 
 Options:
-      --host <HOST>    defines Rusnel listening host (the network interface) [default: 0.0.0.0]
-  -p, --port <PORT>    defines Rusnel listening port [default: 8080]
-      --allow-reverse  Allow clients to specify reverse port forwarding remotes
-  -v, --verbose        enable verbose logging
-      --debug          enable debug logging
-  -h, --help           Print help
+      --host <HOST>          defines Rusnel listening host [default: 0.0.0.0]
+  -p, --port <PORT>          defines Rusnel listening port [default: 8080]
+      --allow-reverse        Allow clients to specify reverse port forwarding remotes
+      --insecure             Disable all TLS authentication (testing only)
+      --tls-self-signed      Persisted self-signed cert under --tls-state-dir
+      --tls-state-dir <DIR>  Directory for persisted self-signed cert/key (default: ~/.rusnel)
+      --tls-cert <PATH>      Server PEM cert (paired with --tls-key)
+      --tls-key  <PATH>      Server PEM key  (paired with --tls-cert)
+      --tls-ca   <PATH>      Enable mTLS: require client certs signed by this CA
+  -v, --verbose              enable verbose logging
+      --debug                enable debug logging
+  -h, --help                 Print help
 ```
 
 ```bash
@@ -110,17 +119,60 @@ Arguments:
 
 
 Options:
-  -v, --verbose  enable verbose logging
-      --debug    enable debug logging
-  -h, --help     Print help
+      --insecure                  Skip server cert verification (testing only)
+      --tls-fingerprint <SHA256>  Pin server cert by SHA-256 fingerprint
+      --tls-ca <PATH>             Verify server cert against this CA bundle
+      --tls-cert <PATH>           Client PEM cert (mTLS; paired with --tls-key + --tls-ca)
+      --tls-key  <PATH>           Client PEM key  (mTLS; paired with --tls-cert + --tls-ca)
+      --tls-server-name <NAME>    Override SNI / verification name
+  -v, --verbose                   enable verbose logging
+      --debug                     enable debug logging
+  -h, --help                      Print help
 ```
 
-## TODO
-- [x] write tests in rust for tcp, udp, reverse and socks 
-- [ ] improve logging by for each tunnel
-- [ ] add proxy support for client (client connects to server through a proxy)
-- [ ] add server tls certificate verificatin
-- [ ] add mutual tls verification
-- [ ] add fake-beckend http/3 feature to server
-- [ ] client reconnect
+## Authentication
 
+Both the server and the client require an explicit TLS-mode flag — there is
+no silent insecure default. Three modes:
+
+| Mode               | Server                                            | Client                                                     |
+|--------------------|---------------------------------------------------|------------------------------------------------------------|
+| Insecure           | `--insecure`                                      | `--insecure`                                               |
+| Fingerprint pin    | `--tls-self-signed` (or `--tls-cert`/`--tls-key`) | `--tls-fingerprint sha256:...`                             |
+| Full mTLS          | `--tls-cert ... --tls-key ... --tls-ca ...`       | `--tls-ca ... --tls-cert ... --tls-key ... [--tls-server-name ...]` |
+
+Quickest path for a private/single-user setup — the server logs its
+fingerprint at startup, the client pins it:
+
+```bash
+rusnel server --tls-self-signed
+# server cert fingerprint: sha256:abcd...
+rusnel client --tls-fingerprint sha256:abcd... 1.2.3.4:8080 1337
+```
+
+For full mTLS, generate a CA + server + client cert (no `openssl` required):
+
+```bash
+scripts/gen-certs.sh ./pki 1.2.3.4
+rusnel server --tls-ca   ./pki/ca.pem --tls-cert ./pki/server.pem --tls-key ./pki/server.key
+rusnel client --tls-ca   ./pki/ca.pem --tls-cert ./pki/client.pem --tls-key ./pki/client.key \
+              --tls-server-name 1.2.3.4 1.2.3.4:8080 1337
+```
+
+`rusnel cert --help` lists the underlying subcommands (`ca`, `server`,
+`client`, `fingerprint`) for finer control. Pre-configured binaries with
+credentials baked in at compile time are also supported via
+`RUSNEL_EMBED_*` env vars — see `build.rs` and the
+[CHANGELOG](CHANGELOG.md) for details.
+
+## TODO
+- [x] write tests in rust for tcp, udp, reverse and socks
+- [x] improve logging by for each tunnel
+- [x] add server tls certificate verification
+- [x] add mutual tls verification
+- [ ] add proxy support for client (client connects to server through a proxy)
+- [ ] add fake-beckend http/3 feature to server
+- [ ] disguise traffic as HTTP/3 to bypass DPI firewalls (ALPN `h3`, default UDP/443, configurable SNI, RFC 9000 QUIC version, optionally CA-signed cert and minimal HTTP/3 facade for active probes)
+- [ ] client reconnect
+- [ ] benchmark performance against chisel (and other tunnel tools, e.g. wstunnel, frp)
+- [ ] support UDP over SOCKS5 (UDP ASSOCIATE — currently only CONNECT/TCP is implemented)

@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 use tokio::{signal, task};
 use tracing::{debug, error, info, info_span, Instrument};
 
-use crate::common::quic::create_client_endpoint;
+use crate::common::quic::{client_server_name, create_client_endpoint};
 use crate::common::remote::{Protocol, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
@@ -18,10 +18,14 @@ pub fn run(config: ClientConfig) -> Result<()> {
 }
 
 pub async fn run_async(config: ClientConfig) -> Result<()> {
-    let endpoint = create_client_endpoint()?;
+    let endpoint = create_client_endpoint(&config.tls)?;
 
-    info!("connecting to server at: {}", config.server);
-    let connection_result = endpoint.connect(config.server, "a")?.await;
+    let server_name = client_server_name(&config.tls);
+    info!(
+        "connecting to server at: {} (sni: {})",
+        config.server, server_name
+    );
+    let connection_result = endpoint.connect(config.server, &server_name)?.await;
 
     let connection = match connection_result {
         Ok(conn) => {
