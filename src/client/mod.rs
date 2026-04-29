@@ -3,7 +3,7 @@ use quinn::{Connection, VarInt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tokio::{signal, task};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::common::quic::create_client_endpoint;
 use crate::common::remote::{Protocol, RemoteRequest};
@@ -11,7 +11,7 @@ use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::{client_send_remote_request, server_receive_remote_request};
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
-use crate::{verbose, ClientConfig};
+use crate::ClientConfig;
 
 pub fn run(config: ClientConfig) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(run_async(config))
@@ -46,19 +46,21 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
         let _ = shutdown_tx_clone.send(());
     });
 
-    debug!("remotes are: {:?}", config.remotes);
-
     let mut tasks = Vec::new();
 
     for remote in config.remotes.clone() {
         let connection_clone = connection.clone();
+        let span = info_span!("tunnel", remote = %remote);
 
-        let task = task::spawn(async move {
-            if let Err(e) = handle_remote_stream(connection_clone, remote).await {
-                error!("Task failed: {}", e)
+        let task = task::spawn(
+            async move {
+                if let Err(e) = handle_remote_stream(connection_clone, remote).await {
+                    error!("failed: {}", e)
+                }
+                anyhow::Ok(())
             }
-            anyhow::Ok(())
-        });
+            .instrument(span),
+        );
         tasks.push(task);
     }
 
@@ -67,7 +69,7 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
         loop {
             let quic_connection = connection_clone.clone();
             if let Err(e) = client_accept_dynamic_reverse_remote(quic_connection).await {
-                error!("Error in accepting dynamic reverse remote: {}", e);
+                error!("reverse tunnel accept error: {}", e);
                 break;
             }
         }
@@ -94,7 +96,7 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
         }
     }
 
-    verbose!("Run function completed");
+    debug!("Run function completed");
     Ok(())
 }
 
@@ -154,42 +156,36 @@ async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest
 }
 
 async fn client_accept_dynamic_reverse_remote(quic_connection: Connection) -> Result<()> {
-    // listen for dyanmic reversed remotes
-    let quic_connection = quic_connection.clone();
     let stream = quic_connection.accept_bi().await?;
-
     let (mut send, mut recv) = stream;
 
     tokio::spawn(async move {
         let dynamic_remote = server_receive_remote_request(&mut send, &mut recv, true).await?;
-        match dynamic_remote {
-            // reverse Tcp remoet
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: _,
-                remote_port: _,
-                reversed: true,
-                protocol: Protocol::Tcp,
-            } => {
-                tunnel_tcp_server(recv, send, dynamic_remote).await?;
-            }
+        let remote_display = dynamic_remote.to_string();
 
-            // reverse Udp remote
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: _,
-                remote_port: _,
-                reversed: true,
-                protocol: Protocol::Udp,
-            } => {
-                tunnel_udp_server(recv, send, dynamic_remote).await?;
+        async {
+            info!("reverse tunnel established");
+            match dynamic_remote {
+                RemoteRequest {
+                    reversed: true,
+                    protocol: Protocol::Tcp,
+                    ..
+                } => {
+                    tunnel_tcp_server(recv, send, dynamic_remote).await?;
+                }
+                RemoteRequest {
+                    reversed: true,
+                    protocol: Protocol::Udp,
+                    ..
+                } => {
+                    tunnel_udp_server(recv, send, dynamic_remote).await?;
+                }
+                _ => error!("received dynamic remote that is not reversed!"),
             }
-
-            _ => error!("received dynamic remote that is not reversed!"),
+            anyhow::Ok(())
         }
-        anyhow::Ok(())
+        .instrument(info_span!("tunnel", remote = %remote_display))
+        .await
     });
     Ok(())
 }

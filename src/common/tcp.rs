@@ -1,16 +1,15 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::Result;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
 };
-use tracing::{debug, info};
+use tracing::{debug, debug_span, info, Instrument};
 
-use crate::{
-    common::tunnel::{
-        client_send_remote_request, client_send_remote_start, server_receive_remote_start,
-    },
-    verbose,
+use crate::common::tunnel::{
+    client_send_remote_request, client_send_remote_start, server_receive_remote_start,
 };
 
 use super::remote::RemoteRequest;
@@ -35,33 +34,39 @@ pub async fn tunnel_tcp_stream(
     };
 
     match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => verbose!("Finished tcp tunnel"),
-        Err(e) => eprintln!("Failed to forward: {}", e),
+        Ok(_) => debug!("closed"),
+        Err(e) => debug!("forward error: {}", e),
     };
     Ok::<(), anyhow::Error>(())
 }
 
 pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
-    // Listen for incoming connections
     let listener = TcpListener::bind(&local_addr).await?;
-    info!("TCP tunnel listening on: {}", local_addr);
+    info!("listening on {}", local_addr);
+
+    let conn_counter = AtomicUsize::new(0);
+
     loop {
-        // Asynchronously wait for an incoming connection
         let (local_socket, addr) = listener.accept().await?;
-        verbose!("new application connected to tunnel: {}", addr);
+        let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let span = debug_span!("conn", id = conn_id, peer = %addr);
 
         let connection = quic_connection.clone();
         let remote = remote.clone();
-        tokio::spawn(async move {
-            let (mut send, mut recv) = connection.open_bi().await?;
+        tokio::spawn(
+            async move {
+                debug!("open");
+                let (mut send, mut recv) = connection.open_bi().await?;
 
-            client_send_remote_request(&remote, &mut send, &mut recv).await?;
-            client_send_remote_start(&mut send, remote).await?;
+                client_send_remote_request(&remote, &mut send, &mut recv).await?;
+                client_send_remote_start(&mut send, remote).await?;
 
-            tunnel_tcp_stream(local_socket, send, recv).await?;
-            Ok::<(), anyhow::Error>(())
-        });
+                tunnel_tcp_stream(local_socket, send, recv).await?;
+                Ok::<(), anyhow::Error>(())
+            }
+            .instrument(span),
+        );
     }
 }
 
@@ -73,9 +78,9 @@ pub async fn tunnel_tcp_server(
     server_receive_remote_start(&mut recv_channel).await?;
 
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
-    debug!("connecting to tunnel remote: {}", remote_addr);
+    debug!("connecting to {}", remote_addr);
     let tcp_stream = TcpStream::connect(&remote_addr).await?;
-    debug!("connected to tunnel remote: {}", remote_addr);
+    debug!("connected to {}", remote_addr);
 
     tunnel_tcp_stream(tcp_stream, send_channel, recv_channel).await?;
 

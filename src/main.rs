@@ -1,7 +1,6 @@
 use clap::crate_version;
 use clap::{Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
-use rusnel::macros::set_verbose;
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process;
@@ -153,14 +152,14 @@ fn main() {
 }
 
 fn set_log_level(is_verbose: bool, is_debug: bool) {
-    let log_level = match is_debug {
-        true => tracing::Level::DEBUG,
-        false => tracing::Level::INFO,
+    let log_level = if is_debug {
+        tracing::Level::TRACE
+    } else if is_verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
     };
     tracing_subscriber::fmt().with_max_level(log_level).init();
 
-    set_verbose(is_verbose);
-
-    debug!("is verbose enabled: {}", is_verbose);
-    debug!("is debug enabled: {}", is_debug);
+    debug!("log level: {}", log_level);
 }

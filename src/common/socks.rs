@@ -1,12 +1,12 @@
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info};
+use tracing::{debug, debug_span, error, info, Instrument};
 
 use crate::common::remote;
-use crate::verbose;
 
 use super::remote::RemoteRequest;
 use super::tcp::tunnel_tcp_stream;
@@ -16,39 +16,51 @@ use anyhow::{anyhow, Result};
 pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
     let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let listener = TcpListener::bind(&local_addr).await?;
-    info!("SOCKS5 proxy listening on {}", &local_addr);
+    info!("SOCKS5 listening on {}", &local_addr);
+
+    let conn_counter = AtomicUsize::new(0);
 
     loop {
-        let (mut local_conn, local_addr) = listener.accept().await?;
+        let (mut local_conn, peer_addr) = listener.accept().await?;
         let connection = quic_connection.clone();
         let remote = remote.clone();
+        let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let span = debug_span!("conn", id = conn_id, peer = %peer_addr);
 
-        tokio::spawn(async move {
-            let dynamic_remote = socks_handshake(&mut local_conn, &remote).await;
-            match dynamic_remote {
-                Err(e) => error!("Error handshaking with client {}: {}", local_addr, e),
-                Ok(dynamic_remote) => {
-                    tokio::spawn(async move {
-                        let (send, recv) = match connection.open_bi().await {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                error!("Failed to open bi connection: {}", e);
-                                return;
-                                // return Err(anyhow!("Failed to open bi connection: {}", e))
-                            }
-                        };
-                        match start_client_dynamic_tunnel(local_conn, send, recv, dynamic_remote)
+        tokio::spawn(
+            async move {
+                let dynamic_remote = socks_handshake(&mut local_conn, &remote).await;
+                match dynamic_remote {
+                    Err(e) => error!("handshake error: {}", e),
+                    Ok(dynamic_remote) => {
+                        debug!(target_remote = %dynamic_remote, "SOCKS5 connect");
+                        tokio::spawn(async move {
+                            let (send, recv) = match connection.open_bi().await {
+                                Ok(stream) => stream,
+                                Err(e) => {
+                                    error!("failed to open stream: {}", e);
+                                    return;
+                                }
+                            };
+                            match start_client_dynamic_tunnel(
+                                local_conn,
+                                send,
+                                recv,
+                                dynamic_remote,
+                            )
                             .await
-                        {
-                            Ok(()) => (),
-                            Err(e) => {
-                                error!("Failed to start dynamic remote: {}", e);
-                            }
-                        };
-                    });
+                            {
+                                Ok(()) => (),
+                                Err(e) => {
+                                    error!("dynamic tunnel error: {}", e);
+                                }
+                            };
+                        });
+                    }
                 }
             }
-        })
+            .instrument(span),
+        )
         .await?;
     }
 }
@@ -62,7 +74,6 @@ async fn start_client_dynamic_tunnel(
     client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
     client_send_remote_start(&mut send_channel, dynamic_remote).await?;
 
-    // Respond to the application with success
     socks_conn
         .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
@@ -73,36 +84,29 @@ async fn start_client_dynamic_tunnel(
 }
 
 // TODO - support udp over socks5 :)
-/// perfomrs socks handshake with application and returns a new dynamic remote request
 async fn socks_handshake(
     conn: &mut TcpStream,
     original_remote: &RemoteRequest,
 ) -> Result<RemoteRequest> {
-    // Step 1: SOCKS5 handshake
     let mut buf = [0u8; 256];
     conn.read_exact(&mut buf[..2]).await?;
 
     if buf[0] != 0x05 {
-        eprintln!("Unsupported SOCKS version: {}", buf[0]);
         return Err(anyhow!("Unsupported SOCKS version: {}", buf[0]));
     }
 
     let methods_len = buf[1] as usize;
     conn.read_exact(&mut buf[..methods_len]).await?;
 
-    // Only support "no authentication" (0x00)
     conn.write_all(&[0x05, 0x00]).await?;
 
-    // Step 2: Read SOCKS5 request
     conn.read_exact(&mut buf[..4]).await?;
 
     if buf[1] != 0x01 {
-        eprintln!("Unsupported command: {}", buf[1]);
-        conn.write_all(&[0x05, 0x07]).await?; // Command not supported
+        conn.write_all(&[0x05, 0x07]).await?;
         return Err(anyhow!("Unsupported SOCKS command: {}", buf[1]));
     }
 
-    // Step 3: Parse address and port
     let dynamic_remote = match buf[3] {
         0x01 => {
             // IPv4
@@ -141,13 +145,10 @@ async fn socks_handshake(
             )
         }
         _ => {
-            eprintln!("Unsupported address type: {}", buf[3]);
-            conn.write_all(&[0x05, 0x08]).await?; // Address type not supported
+            conn.write_all(&[0x05, 0x08]).await?;
             return Err(anyhow!("Unsupported address type: {}", buf[3]));
         }
     };
-
-    verbose!("Creating dynamic remote: {:?}", dynamic_remote);
 
     Ok(dynamic_remote)
 }

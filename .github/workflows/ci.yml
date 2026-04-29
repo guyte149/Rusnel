@@ -20,3 +20,14 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+      - name: Version bump check
+        run: |
+          PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          git fetch origin master
+          BASE_VERSION=$(git show origin/master:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ "$PR_VERSION" = "$BASE_VERSION" ]; then
+            echo "::error::Version in Cargo.toml ($PR_VERSION) was not bumped from master ($BASE_VERSION)"
+            exit 1
+          fi
+          echo "Version bumped: $BASE_VERSION -> $PR_VERSION"

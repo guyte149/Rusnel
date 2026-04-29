@@ -4,7 +4,6 @@ use tracing::debug;
 
 use crate::common::remote::RemoteResponse;
 use crate::common::utils::SerdeHelper;
-use crate::verbose;
 
 use super::remote::RemoteRequest;
 
@@ -13,12 +12,10 @@ pub async fn client_send_remote_request(
     send_channel: &mut SendStream,
     recv_channel: &mut RecvStream,
 ) -> Result<()> {
-    // Send remote request to Rusnel server
-    debug!("Sending remote request to server: {:?}", remote);
+    debug!("sending remote request");
     let serialized = remote.to_json()?;
     send_channel.write_all(serialized.as_bytes()).await?;
 
-    // Receive remote response
     let mut buffer = [0u8; 1024];
     let n = recv_channel
         .read(&mut buffer)
@@ -26,15 +23,10 @@ pub async fn client_send_remote_request(
         .ok_or_else(|| anyhow!("Connection closed before receiving response"))?;
     let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
 
-    // validate remote response
     match response {
         RemoteResponse::RemoteFailed(err) => return Err(anyhow!("Remote tunnel error: {}", err)),
-        _ => {
-            debug!("remote response {:?}", response)
-        }
+        _ => debug!("remote accepted"),
     }
-
-    debug!("Created remote stream: {:?}", remote);
 
     Ok(())
 }
@@ -44,7 +36,6 @@ pub async fn server_receive_remote_request(
     recv_channel: &mut RecvStream,
     allow_reverse: bool,
 ) -> Result<RemoteRequest> {
-    // Read remote request from Rusnel client
     let mut buffer = [0; 1024];
     let n = recv_channel
         .read(&mut buffer)
@@ -52,7 +43,7 @@ pub async fn server_receive_remote_request(
         .ok_or_else(|| anyhow!("Connection closed before receiving request"))?;
     let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
 
-    verbose!("Received remote request: {:?}", request);
+    debug!("received remote request: {}", request);
 
     if request.reversed && !allow_reverse {
         let response =
@@ -64,7 +55,6 @@ pub async fn server_receive_remote_request(
     }
 
     let response = RemoteResponse::RemoteOk;
-    debug!("sending remote response to client {:?}", response);
     send_channel
         .write_all(response.to_json()?.as_bytes())
         .await?;
@@ -73,26 +63,19 @@ pub async fn server_receive_remote_request(
 
 pub async fn client_send_remote_start(
     send_channel: &mut SendStream,
-    remote: RemoteRequest,
+    _remote: RemoteRequest,
 ) -> Result<()> {
-    let remote_start = "remote_start".as_bytes();
-    debug!("sending remote start to server");
-    send_channel.write_all(remote_start).await?;
-
-    verbose!("Starting remote stream to: {:?}", remote);
-
-    // TODO - maybe validate server "remoted started"
+    debug!("sending remote start");
+    send_channel.write_all(b"remote_start").await?;
     Ok(())
 }
 
 pub async fn server_receive_remote_start(recv_channel: &mut RecvStream) -> Result<()> {
     let mut buffer = [0u8; 1024];
-    let n: usize = recv_channel
+    recv_channel
         .read(&mut buffer)
         .await?
         .ok_or_else(|| anyhow!("Connection closed before receiving remote start"))?;
-    let start: String = String::from_utf8_lossy(&buffer[..n]).into();
-
-    debug!("Received remote start command: {}", start);
+    debug!("received remote start");
     Ok(())
 }

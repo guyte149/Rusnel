@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tracing::{debug, info};
 
-use crate::{common::tunnel::client_send_remote_request, verbose};
+use crate::common::tunnel::client_send_remote_request;
 
 use super::remote::RemoteRequest;
 
@@ -20,7 +20,6 @@ pub async fn tunnel_udp_stream(
         let mut buf = vec![0u8; 1024];
         loop {
             let (len, received_addr) = udp_socket.recv_from(&mut buf).await?;
-            // validate that the received packet is from the correct application.
             if received_addr == udp_address {
                 send_channel.write_all(&buf[..len]).await?;
             }
@@ -46,8 +45,8 @@ pub async fn tunnel_udp_stream(
     };
 
     match tokio::try_join!(client_to_server, server_to_client) {
-        Ok(_) => verbose!("Finished udp tunnel"),
-        Err(e) => eprintln!("Failed to forward: {}", e),
+        Ok(_) => debug!("closed"),
+        Err(e) => debug!("forward error: {}", e),
     };
     Ok::<(), anyhow::Error>(())
 }
@@ -56,7 +55,7 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
     let listen_addr = format!("{}:{}", remote.local_host, remote.local_port);
     let udp_socket = Arc::new(UdpSocket::bind(&listen_addr).await?);
 
-    info!("UDP tunnel listening on: {}", listen_addr);
+    info!("listening on {}", listen_addr);
 
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
     client_send_remote_request(&remote, &mut send_channel, &mut recv_channel).await?;
@@ -64,7 +63,7 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
     let mut buffer = [0u8; 1024];
     let (n, local_conn_addr) = udp_socket.recv_from(&mut buffer).await?;
 
-    verbose!("received UDP connection from: {}", local_conn_addr);
+    debug!(peer = %local_conn_addr, "first packet received");
 
     send_channel.write_all(&buffer[..n]).await?;
 
@@ -83,7 +82,7 @@ pub async fn tunnel_udp_server(
 
     let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
-    debug!("connecting to remote UDP: {}", remote_addr);
+    debug!("connecting to {}", remote_addr);
 
     tunnel_udp_stream(udp_socket, remote_addr, send_channel, recv_channel).await?;
 
