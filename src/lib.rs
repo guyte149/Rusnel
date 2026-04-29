@@ -5,6 +5,7 @@ use common::tls::{ClientTlsConfig, ServerTlsConfig};
 use std::net::{IpAddr, SocketAddr};
 use tracing::{error, info};
 
+pub mod cert;
 pub mod client;
 pub mod common;
 pub mod server;

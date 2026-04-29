@@ -15,7 +15,7 @@ categories = ["network-programming"]
 clap = { version = "4.5.9", features = ["derive", "color", "suggestions", "cargo"] }
 quinn = "0.11.2"
 tokio = { version = "1.38.1", features = ["full"] }
-rcgen = "0.13.1"
+rcgen = { version = "0.13.1", features = ["x509-parser"] }
 rustls = { version = "0.23.11", features = ["ring"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3"

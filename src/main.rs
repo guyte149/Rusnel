@@ -1,6 +1,7 @@
 use clap::crate_version;
 use clap::error::ErrorKind;
-use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
+use clap::{ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand};
+use rusnel::cert;
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
@@ -189,6 +190,84 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         #[arg(long("debug"), default_value_t = false)]
         is_debug: bool,
     },
+    /// generate certificates for use with --tls-* flags
+    Cert {
+        #[command(subcommand)]
+        action: CertAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CertAction {
+    /// Create a self-signed certificate authority that can sign server and
+    /// client certs.
+    Ca(CaArgs),
+    /// Issue a server certificate signed by an existing CA. Requires at least
+    /// one --name (DNS) or --ip SAN matching how clients will reach the
+    /// server.
+    Server(ServerCertArgs),
+    /// Issue a client certificate signed by an existing CA.
+    Client(ClientCertArgs),
+    /// Print the SHA-256 fingerprint of the leaf certificate in a PEM file
+    /// (the value `--tls-fingerprint` expects).
+    Fingerprint {
+        /// Path to a PEM-encoded certificate (e.g. server.pem).
+        cert: PathBuf,
+    },
+}
+
+#[derive(Debug, ClapArgs)]
+struct CaArgs {
+    /// Directory to write ca.pem and ca.key into. Created if missing.
+    #[arg(long, value_name = "DIR", default_value = "./pki")]
+    out_dir: PathBuf,
+    /// Common name embedded in the CA certificate.
+    #[arg(long, default_value = "rusnel-ca")]
+    common_name: String,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ServerCertArgs {
+    /// Directory to write the resulting cert + key into.
+    #[arg(long, value_name = "DIR", default_value = "./pki")]
+    out_dir: PathBuf,
+    /// Path to the CA certificate (PEM).
+    #[arg(long, value_name = "PATH")]
+    ca: PathBuf,
+    /// Path to the CA private key (PEM).
+    #[arg(long, value_name = "PATH")]
+    ca_key: PathBuf,
+    /// Common name. Defaults to the first --name SAN if any.
+    #[arg(long)]
+    common_name: Option<String>,
+    /// DNS Subject Alternative Name. May be repeated.
+    #[arg(long = "name", value_name = "DNS")]
+    names: Vec<String>,
+    /// IP Subject Alternative Name. May be repeated.
+    #[arg(long = "ip", value_name = "IP")]
+    ips: Vec<IpAddr>,
+    /// Output filename stem (default `server`).
+    #[arg(long, default_value = "server")]
+    file_stem: String,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ClientCertArgs {
+    /// Directory to write the resulting cert + key into.
+    #[arg(long, value_name = "DIR", default_value = "./pki")]
+    out_dir: PathBuf,
+    /// Path to the CA certificate (PEM).
+    #[arg(long, value_name = "PATH")]
+    ca: PathBuf,
+    /// Path to the CA private key (PEM).
+    #[arg(long, value_name = "PATH")]
+    ca_key: PathBuf,
+    /// Common name embedded in the client certificate.
+    #[arg(long, default_value = "rusnel-client")]
+    common_name: String,
+    /// Output filename stem (default: matches --common-name).
+    #[arg(long)]
+    file_stem: Option<String>,
 }
 
 /// Resolve the server CLI flags into a [`ServerTlsConfig`]. Clap's `ArgGroup`
@@ -346,7 +425,54 @@ fn main() {
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }
+        Mode::Cert { action } => {
+            // Cert generation is a one-shot tool, not a server. Use a minimal
+            // INFO logger so file paths are visible without --verbose.
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_target(false)
+                .without_time()
+                .init();
+            if let Err(e) = run_cert(action) {
+                Args::command()
+                    .error(ErrorKind::Io, format!("{e:#}"))
+                    .exit();
+            }
+        }
     }
+}
+
+fn run_cert(action: CertAction) -> anyhow::Result<()> {
+    match action {
+        CertAction::Ca(a) => {
+            cert::generate_ca(&a.out_dir, &a.common_name)?;
+        }
+        CertAction::Server(a) => {
+            let cn = a
+                .common_name
+                .clone()
+                .or_else(|| a.names.first().cloned())
+                .unwrap_or_else(|| "rusnel-server".to_string());
+            cert::generate_server_cert(
+                &a.out_dir,
+                &a.ca,
+                &a.ca_key,
+                &cn,
+                &a.names,
+                &a.ips,
+                &a.file_stem,
+            )?;
+        }
+        CertAction::Client(a) => {
+            let stem = a.file_stem.clone().unwrap_or_else(|| a.common_name.clone());
+            cert::generate_client_cert(&a.out_dir, &a.ca, &a.ca_key, &a.common_name, &stem)?;
+        }
+        CertAction::Fingerprint { cert } => {
+            let fp = cert::print_fingerprint(&cert)?;
+            println!("{fp}");
+        }
+    }
+    Ok(())
 }
 
 fn set_log_level(is_verbose: bool, is_debug: bool) {
