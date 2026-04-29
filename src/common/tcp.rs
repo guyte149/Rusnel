@@ -8,9 +8,7 @@ use tokio::{
 };
 use tracing::{debug, debug_span, info, Instrument};
 
-use crate::common::tunnel::{
-    client_send_remote_request, client_send_remote_start, server_receive_remote_start,
-};
+use crate::common::tunnel::client_send_remote_request;
 
 use super::remote::RemoteRequest;
 
@@ -60,7 +58,6 @@ pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteReques
                 let (mut send, mut recv) = connection.open_bi().await?;
 
                 client_send_remote_request(&remote, &mut send, &mut recv).await?;
-                client_send_remote_start(&mut send, remote).await?;
 
                 tunnel_tcp_stream(local_socket, send, recv).await?;
                 Ok::<(), anyhow::Error>(())
@@ -71,12 +68,10 @@ pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteReques
 }
 
 pub async fn tunnel_tcp_server(
-    mut recv_channel: RecvStream,
+    recv_channel: RecvStream,
     send_channel: SendStream,
     request: RemoteRequest,
 ) -> Result<()> {
-    server_receive_remote_start(&mut recv_channel).await?;
-
     let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
     debug!("connecting to {}", remote_addr);
     let tcp_stream = TcpStream::connect(&remote_addr).await?;

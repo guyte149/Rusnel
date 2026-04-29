@@ -10,7 +10,7 @@ use crate::common::remote;
 
 use super::remote::RemoteRequest;
 use super::tcp::tunnel_tcp_stream;
-use super::tunnel::{client_send_remote_request, client_send_remote_start};
+use super::tunnel::client_send_remote_request;
 use anyhow::{anyhow, Result};
 
 pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
@@ -72,7 +72,6 @@ async fn start_client_dynamic_tunnel(
     dynamic_remote: RemoteRequest,
 ) -> Result<()> {
     client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
-    client_send_remote_start(&mut send_channel, dynamic_remote).await?;
 
     socks_conn
         .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])

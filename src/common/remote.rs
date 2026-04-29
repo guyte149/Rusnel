@@ -231,10 +231,3 @@ pub enum RemoteResponse {
 }
 
 impl SerdeHelper for RemoteResponse {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RemoteStart {
-    remote_start: bool,
-}
-
-impl SerdeHelper for RemoteStart {}
