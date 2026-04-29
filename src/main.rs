@@ -5,20 +5,41 @@ use rusnel::cert;
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
 use rusnel::embedded::{self, Materialized};
-use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use rusnel::{run_client, run_server, ClientConfig, ServerConfig, ServerEndpoint};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::{debug, info};
 
-/// Resolve `host:port` to a `SocketAddr`. Used as a clap `value_parser` so
-/// resolution failures surface as `clap::Error` (consistent formatting +
-/// exit code 2) instead of a panic (#20 §4).
-fn parse_server_addr(s: &str) -> Result<SocketAddr, String> {
-    s.to_socket_addrs()
+/// Resolve `host:port` to a `ServerEndpoint`, preserving the original host
+/// string so it can be reused as the TLS SNI value (see `client_server_name`).
+/// Used as a clap `value_parser` so resolution failures surface as a
+/// `clap::Error` (consistent formatting + exit code 2) instead of a panic
+/// (#20 §4).
+fn parse_server_addr(s: &str) -> Result<ServerEndpoint, String> {
+    // Split host:port without losing the host. We do this manually instead of
+    // relying on `SocketAddr::from_str` because we want to accept DNS names
+    // too, not just IP literals.
+    let host = if let Some(rest) = s.strip_prefix('[') {
+        // IPv6 literal form: `[addr]:port`.
+        let close = rest
+            .find(']')
+            .ok_or_else(|| format!("malformed IPv6 address in `{s}` (missing `]`)"))?;
+        rest[..close].to_string()
+    } else {
+        s.rsplit_once(':')
+            .ok_or_else(|| format!("expected host:port in `{s}`"))?
+            .0
+            .to_string()
+    };
+
+    let addr = s
+        .to_socket_addrs()
         .map_err(|e| format!("failed to resolve server address `{s}`: {e}"))?
         .next()
-        .ok_or_else(|| format!("no addresses found for server `{s}`"))
+        .ok_or_else(|| format!("no addresses found for server `{s}`"))?;
+
+    Ok(ServerEndpoint { addr, host })
 }
 
 /// Parse a remote spec via `RemoteRequest::from_str`, surfacing parse errors
@@ -107,7 +128,7 @@ enum Mode {
     Client {
         /// defines the Rusnel server address (in form of host:port)
         #[arg(value_parser = parse_server_addr)]
-        server: SocketAddr,
+        server: ServerEndpoint,
 
         #[arg(name = "remote", required = true, value_parser = parse_remote, value_delimiter = ' ', num_args = 1.., help=r#"
 <remote>s are remote connections tunneled through the server, each which come in the form:

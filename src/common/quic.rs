@@ -13,7 +13,11 @@ use tracing::{debug, info, warn};
 
 use crate::common::tls::{cert_sha256, format_fingerprint, ClientTlsConfig, ServerTlsConfig};
 
-static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"]; // TODO: change to h3
+// Use the HTTP/3 ALPN identifier so handshake fingerprints look like a real
+// QUIC HTTP/3 service. We don't actually speak HTTP/3 — once the TLS handshake
+// completes we tunnel arbitrary streams over QUIC — but advertising `h3` makes
+// passive observers and DPI middleboxes far less likely to flag the traffic.
+static ALPN_QUIC_HTTP: &[&[u8]] = &[b"h3"];
 
 pub fn create_server_endpoint(host: IpAddr, port: u16, tls: &ServerTlsConfig) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
@@ -246,20 +250,35 @@ fn build_quic_client_config(tls: &ClientTlsConfig) -> Result<ClientConfig> {
     )?)))
 }
 
-/// The SNI / `ServerName` value to use when calling `Endpoint::connect`. For
-/// `Fingerprint` mode we ignore the name during verification, but rustls still
-/// requires a parseable name to send in the ClientHello. For other modes the
-/// name affects verification, so the user can override it via
-/// `--tls-server-name`. Falls back to a placeholder so existing
-/// `Insecure`-mode invocations keep working.
-pub fn client_server_name(tls: &ClientTlsConfig) -> String {
+/// The SNI / `ServerName` value to use when calling `Endpoint::connect`.
+///
+/// Resolution order:
+/// 1. An explicit `--tls-server-name` (or embedded `EMBED_SERVER_NAME`) wins
+///    in every mode that supports it (`Fingerprint`, `Ca`, `Mtls`).
+/// 2. Otherwise we fall back to `server_host` — the host string the user
+///    typed on the CLI (e.g. `example.com` from `example.com:8080`). When
+///    that's a DNS name, it goes on the wire as the SNI extension; when it's
+///    an IP literal, rustls automatically suppresses the SNI extension per
+///    RFC 6066 §3, which is also what real HTTPS clients do.
+///
+/// Using the original hostname as the default is a deliberate choice for the
+/// HTTP/3 disguise goal: a passive observer sees `SNI=example.com` instead of
+/// a static `SNI=rusnel` placeholder that fingerprinted the protocol.
+///
+/// For `Fingerprint` mode the name is ignored during verification (we only
+/// match the leaf cert SHA-256), so any value is safe. For `Ca` / `Mtls`
+/// modes the SNI must match a SAN in the server certificate; the previous
+/// `"rusnel"` fallback effectively required the user to pass
+/// `--tls-server-name`, whereas the new default works automatically when the
+/// cert is issued for the hostname the client connects to.
+pub fn client_server_name(tls: &ClientTlsConfig, server_host: &str) -> String {
     match tls {
-        ClientTlsConfig::Insecure => "rusnel".to_string(),
+        ClientTlsConfig::Insecure => server_host.to_string(),
         ClientTlsConfig::Fingerprint { server_name, .. }
         | ClientTlsConfig::Ca { server_name, .. }
-        | ClientTlsConfig::Mtls { server_name, .. } => {
-            server_name.clone().unwrap_or_else(|| "rusnel".to_string())
-        }
+        | ClientTlsConfig::Mtls { server_name, .. } => server_name
+            .clone()
+            .unwrap_or_else(|| server_host.to_string()),
     }
 }
 
