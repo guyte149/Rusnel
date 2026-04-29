@@ -177,15 +177,23 @@ fn build_quic_server_config(
 
 fn build_quic_client_config(tls: &ClientTlsConfig) -> Result<ClientConfig> {
     let mut client_crypto = match tls {
-        ClientTlsConfig::Insecure => TlsClientConfig::builder()
+        ClientTlsConfig::Insecure => {
+            warn!(
+                "starting client in --insecure mode: skipping server certificate verification. \
+                 MITM-vulnerable; for testing only."
+            );
+            TlsClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(SkipServerVerification::new())
+                .with_no_client_auth()
+        }
+        ClientTlsConfig::Fingerprint { sha256, .. } => TlsClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(SkipServerVerification::new())
+            .with_custom_certificate_verifier(FingerprintVerifier::new(*sha256))
             .with_no_client_auth(),
-        ClientTlsConfig::Fingerprint { .. }
-        | ClientTlsConfig::Ca { .. }
-        | ClientTlsConfig::Mtls { .. } => {
+        ClientTlsConfig::Ca { .. } | ClientTlsConfig::Mtls { .. } => {
             return Err(anyhow!(
-                "this TLS mode is not implemented yet; use --insecure for now"
+                "CA-based and mTLS client modes are not implemented yet"
             ))
         }
     };
@@ -194,6 +202,23 @@ fn build_quic_client_config(tls: &ClientTlsConfig) -> Result<ClientConfig> {
     Ok(ClientConfig::new(Arc::new(QuicClientConfig::try_from(
         client_crypto,
     )?)))
+}
+
+/// The SNI / `ServerName` value to use when calling `Endpoint::connect`. For
+/// `Fingerprint` mode we ignore the name during verification, but rustls still
+/// requires a parseable name to send in the ClientHello. For other modes the
+/// name affects verification, so the user can override it via
+/// `--tls-server-name`. Falls back to a placeholder so existing
+/// `Insecure`-mode invocations keep working.
+pub fn client_server_name(tls: &ClientTlsConfig) -> String {
+    match tls {
+        ClientTlsConfig::Insecure => "rusnel".to_string(),
+        ClientTlsConfig::Fingerprint { server_name, .. }
+        | ClientTlsConfig::Ca { server_name, .. }
+        | ClientTlsConfig::Mtls { server_name, .. } => {
+            server_name.clone().unwrap_or_else(|| "rusnel".to_string())
+        }
+    }
 }
 
 fn generate_ephemeral_self_signed() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>
@@ -258,5 +283,83 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Verifies the server's leaf certificate by SHA-256 fingerprint of its DER
+/// encoding. Skips name/SAN/expiry checks — the user has explicitly pinned the
+/// public key bytes. Signature verification is still delegated to the crypto
+/// provider so the TLS handshake proves the peer holds the matching private key.
+#[derive(Debug)]
+struct FingerprintVerifier {
+    expected: [u8; 32],
+    crypto: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl FingerprintVerifier {
+    fn new(expected: [u8; 32]) -> Arc<Self> {
+        Arc::new(Self {
+            expected,
+            crypto: Arc::new(rustls::crypto::ring::default_provider()),
+        })
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let actual = cert_sha256(end_entity);
+        if actual == self.expected {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            warn!(
+                "server cert fingerprint mismatch: expected {}, got {}",
+                format_fingerprint(&self.expected),
+                format_fingerprint(&actual),
+            );
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.crypto.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.crypto.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.crypto
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }

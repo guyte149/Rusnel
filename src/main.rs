@@ -2,7 +2,7 @@ use clap::crate_version;
 use clap::error::ErrorKind;
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use rusnel::common::remote::RemoteRequest;
-use rusnel::common::tls::{ClientTlsConfig, ServerTlsConfig};
+use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -94,7 +94,7 @@ enum Mode {
     #[command(group(
         ArgGroup::new("client_tls_mode")
             .required(true)
-            .args(["insecure"]),
+            .args(["insecure", "tls_fingerprint"]),
     ))]
     Client {
         /// defines the Rusnel server address (in form of host:port)
@@ -144,6 +144,19 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         #[arg(long, default_value_t = false)]
         insecure: bool,
 
+        /// Pin the server's leaf certificate by SHA-256 fingerprint. Accepts
+        /// `sha256:<hex>`, bare hex, or colon-separated hex. The expected
+        /// value is logged by the server at startup as
+        /// `server cert fingerprint: sha256:<hex>`.
+        #[arg(long, value_name = "SHA256", conflicts_with = "insecure")]
+        tls_fingerprint: Option<String>,
+
+        /// Override the SNI / server name sent during the TLS handshake. By
+        /// default a placeholder is used since fingerprint pinning ignores
+        /// names.
+        #[arg(long, value_name = "NAME")]
+        tls_server_name: Option<String>,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -188,12 +201,24 @@ fn default_state_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "could not determine home directory; pass --tls-state-dir explicitly".into())
 }
 
-fn resolve_client_tls(insecure: bool) -> ClientTlsConfig {
-    // Only --insecure is supported on the client until fingerprint pinning
-    // and CA-based modes land in subsequent PRs. Clap's ArgGroup makes
-    // --insecure required for now.
-    debug_assert!(insecure);
-    ClientTlsConfig::Insecure
+fn resolve_client_tls(
+    insecure: bool,
+    tls_fingerprint: Option<String>,
+    tls_server_name: Option<String>,
+) -> Result<ClientTlsConfig, String> {
+    if insecure {
+        return Ok(ClientTlsConfig::Insecure);
+    }
+    if let Some(raw) = tls_fingerprint {
+        let sha256 = parse_fingerprint(&raw)
+            .map_err(|e| format!("invalid --tls-fingerprint value `{raw}`: {e}"))?;
+        return Ok(ClientTlsConfig::Fingerprint {
+            sha256,
+            server_name: tls_server_name,
+        });
+    }
+    // Unreachable: clap's ArgGroup guarantees one mode is selected.
+    Err("internal error: client TLS mode flags not validated correctly".into())
 }
 
 fn main() {
@@ -247,15 +272,22 @@ fn main() {
             server,
             remotes,
             insecure,
+            tls_fingerprint,
+            tls_server_name,
             is_verbose,
             is_debug,
         } => {
             set_log_level(is_verbose, is_debug);
 
+            let tls = match resolve_client_tls(insecure, tls_fingerprint, tls_server_name) {
+                Ok(t) => t,
+                Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
+            };
+
             let client_config = ClientConfig {
                 server,
                 remotes,
-                tls: resolve_client_tls(insecure),
+                tls,
             };
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);

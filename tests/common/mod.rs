@@ -45,19 +45,35 @@ pub fn get_available_udp_port() -> u16 {
 }
 
 pub fn server_config(port: u16, allow_reverse: bool) -> ServerConfig {
+    server_config_with_tls(port, allow_reverse, ServerTlsConfig::Insecure)
+}
+
+pub fn server_config_with_tls(
+    port: u16,
+    allow_reverse: bool,
+    tls: ServerTlsConfig,
+) -> ServerConfig {
     ServerConfig {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port,
         allow_reverse,
-        tls: ServerTlsConfig::Insecure,
+        tls,
     }
 }
 
 pub fn client_config(server_port: u16, remotes: Vec<RemoteRequest>) -> ClientConfig {
+    client_config_with_tls(server_port, remotes, ClientTlsConfig::Insecure)
+}
+
+pub fn client_config_with_tls(
+    server_port: u16,
+    remotes: Vec<RemoteRequest>,
+    tls: ClientTlsConfig,
+) -> ClientConfig {
     ClientConfig {
         server: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server_port),
         remotes,
-        tls: ClientTlsConfig::Insecure,
+        tls,
     }
 }
 
