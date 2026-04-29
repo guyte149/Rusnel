@@ -5,37 +5,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Development Commands
 
 ```bash
-cargo build                  # Debug build
-cargo build --release        # Release build
-cargo run server             # Run server (default 0.0.0.0:8080)
-cargo run client <host:port> <remote>...  # Run client
-cargo fmt --all              # Format code
-cargo clippy --all -- -D warnings  # Lint (CI treats warnings as errors)
+cargo build                    # debug build
+cargo build --release          # release build (stripped, LTO)
+cargo test --all               # run all integration tests
+cargo test --test tunnels      # run a single test file
+cargo test test_tcp_forward    # run a single test by name
+cargo fmt --all -- --check     # check formatting
+cargo clippy --all -- -D warnings  # lint
 ```
 
-Integration tests are shell-based: `bash tests/test.sh` (requires `nc`/netcat). There are no Rust unit tests yet. CI runs fmt and clippy only (tests are commented out in the workflow).
+CI enforces: version bump on every PR, `cargo fmt`, `cargo clippy -D warnings`, and `cargo test --all`.
 
 ## Architecture
 
-Rusnel is a single-binary TCP/UDP tunneling tool over QUIC. The binary runs as either `rusnel server` or `rusnel client` via clap subcommands.
+Rusnel is a TCP/UDP tunneling tool over QUIC. A single binary acts as either `server` or `client` (plus a `cert` subcommand for PKI).
 
-### Core Flow
+### Data flow
 
-1. **QUIC transport** (`src/common/quic.rs`): Server generates a self-signed TLS cert at startup. Client skips server cert verification (intentional — proper verification is a TODO). Both use `quinn` with ALPN `h3` (to blend in with HTTP/3 traffic; we don't actually speak HTTP/3).
+1. **CLI parsing** (`src/main.rs`): clap derives `Mode::Server | Mode::Client | Mode::Cert`. TLS config resolution (`resolve_server_tls` / `resolve_client_tls`) merges CLI flags with optional compile-time embedded credentials.
+2. **QUIC setup** (`src/common/quic.rs`): creates quinn endpoints. Server listens; client connects. TLS config (`src/common/tls.rs`) handles four modes: Insecure, SelfSigned, Provided/Ca, mTLS.
+3. **Control plane** (`src/common/tunnel.rs`): length-prefixed MessagePack frames over QUIC bi-streams. Client sends a `RemoteRequest`; server replies with `RemoteResponse`.
+4. **Data plane**: after the control handshake, the stream is handed to the appropriate tunnel handler:
+   - `src/common/tcp.rs` — forward/reverse TCP
+   - `src/common/udp.rs` — forward/reverse UDP
+   - `src/common/socks.rs` — SOCKS5 (forward and reverse)
 
-2. **Remote negotiation** (`src/common/tunnel.rs`): Each tunnel starts with the client opening a QUIC bi-directional stream, sending a JSON-serialized `RemoteRequest`, and receiving a `RemoteResponse`. The server validates the request (e.g., rejects reverse remotes unless `--allow-reverse`).
+### Client vs Server symmetry
 
-3. **Tunnel types** — dispatched by pattern matching on `RemoteRequest` fields in both `src/server/mod.rs` and `src/client/mod.rs`:
-   - **Forward TCP** (`src/common/tcp.rs`): Client listens locally, opens QUIC stream per connection, server connects to remote host. Bidirectional copy via `tokio::io::copy`.
-   - **Reverse TCP**: Server listens, client connects to local target. Same stream logic, roles swapped.
-   - **Forward/Reverse UDP** (`src/common/udp.rs`): Single QUIC stream per tunnel, UDP packets forwarded over it. Fixed 1024-byte buffer.
-   - **SOCKS5** (`src/common/socks.rs`): Client does SOCKS5 handshake with the application, extracts target host:port, then creates a dynamic `RemoteRequest` sent through the normal tunnel flow. Supports IPv4 and domain address types (no IPv6).
-   - **Reverse SOCKS5**: Server-side SOCKS5 proxy; client accepts dynamic reverse remotes via `client_accept_dynamic_reverse_remote`.
+Both sides reuse `tunnel_tcp_client` / `tunnel_tcp_server` etc. The "client" side of a tunnel listens locally and forwards via QUIC; the "server" side receives from QUIC and connects to the target. Reverse tunnels swap these roles. This is why `client/mod.rs` imports `tunnel_tcp_server` and `server/mod.rs` imports `tunnel_tcp_client`.
 
-4. **Remote parsing** (`src/common/remote.rs`): `RemoteRequest::from_str` parses the flexible CLI remote syntax (e.g., `1337`, `R:2222:localhost:22`, `socks`, `1.1.1.1:53/udp`).
+### Remote spec parsing
 
-5. **Verbose macro** (`src/macros.rs`): `verbose!()` is a custom macro that logs at INFO level only when `--verbose` is set (controlled by a global `AtomicBool`). Distinct from `--debug` which sets tracing to DEBUG level.
+`RemoteRequest::from_str` in `src/common/remote.rs` parses the flexible `[R:]<local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>` format with cascading defaults. The special `socks` keyword replaces remote-host:remote-port.
 
-### Naming Conventions
+### Embedded credentials
 
-`tunnel_*_client` = the side that listens for local connections and initiates QUIC streams. `tunnel_*_server` = the side that receives QUIC streams and connects to the remote target. In reverse mode, the server runs `tunnel_*_client` and vice versa.
+`build.rs` reads `RUSNEL_EMBED_*` env vars at compile time and bakes cert/key bytes into the binary via `include_bytes!`. `src/embedded.rs` materializes them to temp files at runtime. This allows pre-configured "drop-and-run" binaries.
+
+### Serialization
+
+`src/common/utils.rs` defines `SerdeHelper` using MessagePack (rmp-serde) for control messages.
+
+## Conventions
+
+- `clippy::unwrap_used` is denied project-wide. Use `?` or explicit error handling. Tests opt out via `#![cfg_attr(test, allow(clippy::unwrap_used, ...))]`.
+- Integration tests live in `tests/` and spawn real server+client pairs on localhost using `tests/common/mod.rs` helpers (`start_tunnel`, `get_available_port`).
+- Tracing (not log) for all logging. Structured spans per session and per tunnel.

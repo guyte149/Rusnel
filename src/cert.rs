@@ -11,9 +11,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, IsCa, KeyPair, KeyUsagePurpose, SanType,
-};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
 use rustls::pki_types::CertificateDer;
 use tracing::info;
 
@@ -96,10 +94,10 @@ pub fn generate_server_cert(
     ];
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
 
-    let (ca_cert, ca_key) = load_signing_ca(ca_cert_path, ca_key_path)?;
+    let issuer = load_signing_ca(ca_cert_path, ca_key_path)?;
     let key_pair = KeyPair::generate().context("failed to generate server key pair")?;
     let cert = params
-        .signed_by(&key_pair, &ca_cert, &ca_key)
+        .signed_by(&key_pair, &issuer)
         .context("failed to sign server cert")?;
 
     let cert_path = out_dir.join(format!("{file_stem}.pem"));
@@ -130,10 +128,10 @@ pub fn generate_client_cert(
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
 
-    let (ca_cert, ca_key) = load_signing_ca(ca_cert_path, ca_key_path)?;
+    let issuer = load_signing_ca(ca_cert_path, ca_key_path)?;
     let key_pair = KeyPair::generate().context("failed to generate client key pair")?;
     let cert = params
-        .signed_by(&key_pair, &ca_cert, &ca_key)
+        .signed_by(&key_pair, &issuer)
         .context("failed to sign client cert")?;
 
     let cert_path = out_dir.join(format!("{file_stem}.pem"));
@@ -162,22 +160,17 @@ pub fn print_fingerprint(path: &Path) -> Result<String> {
     Ok(format_fingerprint(&cert_sha256(leaf)))
 }
 
-/// Load a CA cert + key pair so it can sign new leaf certs. rcgen needs the
-/// `Certificate` to extract the issuer DN, so we re-parse the existing PEM
-/// into `CertificateParams` and re-bind the key pair.
-fn load_signing_ca(cert_path: &Path, key_path: &Path) -> Result<(Certificate, KeyPair)> {
+/// Load a CA cert + key pair into an [`Issuer`] so it can sign new leaf certs.
+/// In rcgen 0.14 the signing-side params (DN, key id method, key usages) are
+/// encapsulated in `Issuer` rather than being threaded through `signed_by`.
+fn load_signing_ca(cert_path: &Path, key_path: &Path) -> Result<Issuer<'static, KeyPair>> {
     let cert_pem = fs::read_to_string(cert_path)
         .with_context(|| format!("failed to read CA cert {}", cert_path.display()))?;
     let key_pem = fs::read_to_string(key_path)
         .with_context(|| format!("failed to read CA key {}", key_path.display()))?;
 
     let key_pair = KeyPair::from_pem(&key_pem).context("failed to parse CA key as PEM")?;
-    let params =
-        CertificateParams::from_ca_cert_pem(&cert_pem).context("failed to parse CA cert as PEM")?;
-    let cert = params
-        .self_signed(&key_pair)
-        .context("failed to rebuild CA cert from params + key")?;
-    Ok((cert, key_pair))
+    Issuer::from_ca_cert_pem(&cert_pem, key_pair).context("failed to parse CA cert as PEM")
 }
 
 fn write_pem(path: &Path, contents: &[u8]) -> Result<()> {

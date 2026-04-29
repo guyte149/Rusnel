@@ -18,7 +18,8 @@ use common::{
     socks5_connect_ipv4, STARTUP_DELAY, TEST_TIMEOUT,
 };
 use rcgen::{
-    generate_simple_self_signed, BasicConstraints, CertificateParams, IsCa, KeyPair, SanType,
+    generate_simple_self_signed, BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair,
+    SanType,
 };
 use rusnel::common::quic::create_client_endpoint;
 use rusnel::common::remote::RemoteRequest;
@@ -35,7 +36,7 @@ fn write_cert_to(dir: &std::path::Path) -> [u8; 32] {
     fs::create_dir_all(dir).unwrap();
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     fs::write(dir.join("server.pem"), cert.cert.pem()).unwrap();
-    fs::write(dir.join("server.key"), cert.key_pair.serialize_pem()).unwrap();
+    fs::write(dir.join("server.key"), cert.signing_key.serialize_pem()).unwrap();
     let der: CertificateDer<'static> = cert.cert.into();
     cert_sha256(&der)
 }
@@ -252,6 +253,7 @@ fn build_pki(dir: &std::path::Path) -> Pki {
     let ca_cert = ca_params.self_signed(&ca_key).unwrap();
     let ca_path = dir.join("ca.pem");
     fs::write(&ca_path, ca_cert.pem()).unwrap();
+    let issuer = Issuer::new(ca_params, ca_key);
 
     // Server cert signed by CA — IP SAN so a connection to 127.0.0.1 verifies.
     let mut srv_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
@@ -261,7 +263,7 @@ fn build_pki(dir: &std::path::Path) -> Pki {
             std::net::Ipv4Addr::LOCALHOST,
         )));
     let srv_key = KeyPair::generate().unwrap();
-    let srv_cert = srv_params.signed_by(&srv_key, &ca_cert, &ca_key).unwrap();
+    let srv_cert = srv_params.signed_by(&srv_key, &issuer).unwrap();
     let server_cert = dir.join("server.pem");
     let server_key = dir.join("server.key");
     fs::write(&server_cert, srv_cert.pem()).unwrap();
@@ -270,7 +272,7 @@ fn build_pki(dir: &std::path::Path) -> Pki {
     // Client cert signed by CA.
     let cli_params = CertificateParams::new(vec!["rusnel-test-client".to_string()]).unwrap();
     let cli_key = KeyPair::generate().unwrap();
-    let cli_cert = cli_params.signed_by(&cli_key, &ca_cert, &ca_key).unwrap();
+    let cli_cert = cli_params.signed_by(&cli_key, &issuer).unwrap();
     let client_cert = dir.join("client.pem");
     let client_key = dir.join("client.key");
     fs::write(&client_cert, cli_cert.pem()).unwrap();

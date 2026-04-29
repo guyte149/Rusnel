@@ -93,7 +93,7 @@ fn load_or_create_self_signed(
     let generated = generate_simple_self_signed(vec!["localhost".into()])
         .context("failed to generate self-signed certificate")?;
     let cert_pem = generated.cert.pem();
-    let key_pem = generated.key_pair.serialize_pem();
+    let key_pem = generated.signing_key.serialize_pem();
 
     fs::write(&cert_path, &cert_pem)
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
@@ -107,7 +107,7 @@ fn load_or_create_self_signed(
 
     let cert_der: CertificateDer<'static> = generated.cert.into();
     let key_der: PrivateKeyDer<'static> =
-        PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()).into();
+        PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()).into();
     Ok((vec![cert_der], key_der))
 }
 
@@ -286,7 +286,7 @@ fn generate_ephemeral_self_signed() -> Result<(Vec<CertificateDer<'static>>, Pri
 {
     debug!("generating ephemeral self-signed certificate");
     let cert = generate_simple_self_signed(vec!["localhost".into()])?;
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+    let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = cert.cert.into();
     Ok((vec![cert], key.into()))
 }
