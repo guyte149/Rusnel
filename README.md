@@ -116,7 +116,7 @@ Options:
 ```
 
 ## TODO
-- [ ] write tests in rust for tcp, udp, reverse and socks 
+- [x] write tests in rust for tcp, udp, reverse and socks 
 - [ ] improve logging by for each tunnel
 - [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] add server tls certificate verificatin
