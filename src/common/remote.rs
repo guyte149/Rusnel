@@ -70,7 +70,10 @@ impl FromStr for RemoteRequest {
         }
 
         if parts.len() > 1 {
-            match *parts.last().unwrap() {
+            match *parts
+                .last()
+                .ok_or_else(|| anyhow!("Invalid format: empty parts"))?
+            {
                 "tcp" => protocol = Protocol::Tcp,
                 "udp" => protocol = Protocol::Udp,
                 _ => return Err(anyhow!("Invalid protocol: Must be 'tcp' or 'udp'")),
@@ -83,7 +86,9 @@ impl FromStr for RemoteRequest {
         let (local_host, local_port, remote_host, remote_port) = match address_parts.len() {
             1 => match address_parts[0] {
                 "socks" => (
-                    "127.0.0.1".parse::<IpAddr>().unwrap(),
+                    "127.0.0.1"
+                        .parse::<IpAddr>()
+                        .map_err(|_| anyhow!("Invalid IP address"))?,
                     1080,
                     String::from("socks"),
                     0,
@@ -93,7 +98,9 @@ impl FromStr for RemoteRequest {
                         .parse::<u16>()
                         .map_err(|_| anyhow!("Invalid remote port"))?;
                     (
-                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        "0.0.0.0"
+                            .parse::<IpAddr>()
+                            .map_err(|_| anyhow!("Invalid IP address"))?,
                         remote_port,
                         "0.0.0.0".to_string(),
                         remote_port,
@@ -106,7 +113,9 @@ impl FromStr for RemoteRequest {
                         .parse::<u16>()
                         .map_err(|_| anyhow!("Invalid remote port"))?;
                     (
-                        "127.0.0.1".parse::<IpAddr>().unwrap(),
+                        "127.0.0.1"
+                            .parse::<IpAddr>()
+                            .map_err(|_| anyhow!("Invalid IP address"))?,
                         local_port,
                         String::from("socks"),
                         0,
@@ -118,7 +127,9 @@ impl FromStr for RemoteRequest {
                         .parse::<u16>()
                         .map_err(|_| anyhow!("Invalid remote port"))?;
                     (
-                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        "0.0.0.0"
+                            .parse::<IpAddr>()
+                            .map_err(|_| anyhow!("Invalid IP address"))?,
                         remote_port,
                         remote_host,
                         remote_port,
@@ -144,7 +155,9 @@ impl FromStr for RemoteRequest {
                         .parse::<u16>()
                         .map_err(|_| anyhow!("Invalid remote port"))?;
                     (
-                        "0.0.0.0".parse::<IpAddr>().unwrap(),
+                        "0.0.0.0"
+                            .parse::<IpAddr>()
+                            .map_err(|_| anyhow!("Invalid IP address"))?,
                         local_port,
                         remote_host,
                         remote_port,

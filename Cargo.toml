@@ -24,5 +24,14 @@ serde = { version = "1.0.*", features = ["derive"] }
 anyhow = "1.0.86"
 futures = "0.3.31"
 
+[lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+strip = true          # Remove symbols - significantly reduces binary size
+lto = true            # Link-time optimization - removes dead code across crates
+codegen-units = 1     # Better optimization (slower compile)
+panic = "abort"       # Smaller panic handling (no unwinding)
+
 [[bin]]
 name = "rusnel"

@@ -14,11 +14,11 @@ static ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 pub fn create_server_endpoint(host: IpAddr, port: u16) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
 
-    let (cert, key) = get_server_certificate_and_key();
+    let (cert, key) = get_server_certificate_and_key()?;
     let mut server_config = create_server_config(cert, key)?;
 
-    // TODO: put this in another function
-    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+    let transport_config =
+        Arc::get_mut(&mut server_config.transport).expect("Failed to get mutable transport config");
     // transport_config.max_idle_timeout(None);
     transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
 
@@ -58,12 +58,13 @@ fn create_client_config() -> Result<ClientConfig> {
     )?)))
 }
 
-fn get_server_certificate_and_key() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+fn get_server_certificate_and_key() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>
+{
     debug!("generating self-signed certificate");
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = generate_simple_self_signed(vec!["localhost".into()])?;
     let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let cert = cert.cert.into();
-    (vec![cert], key.into())
+    Ok((vec![cert], key.into()))
 }
 
 // Dummy certificate verifier that treats any certificate as valid.

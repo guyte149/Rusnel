@@ -20,7 +20,10 @@ pub async fn client_send_remote_request(
 
     // Receive remote response
     let mut buffer = [0u8; 1024];
-    let n = recv_channel.read(&mut buffer).await?.unwrap();
+    let n = recv_channel
+        .read(&mut buffer)
+        .await?
+        .ok_or_else(|| anyhow!("Connection closed before receiving response"))?;
     let response = RemoteResponse::from_bytes(Vec::from(&buffer[..n]))?;
 
     // validate remote response
@@ -43,7 +46,10 @@ pub async fn server_receive_remote_request(
 ) -> Result<RemoteRequest> {
     // Read remote request from Rusnel client
     let mut buffer = [0; 1024];
-    let n = recv_channel.read(&mut buffer).await?.unwrap();
+    let n = recv_channel
+        .read(&mut buffer)
+        .await?
+        .ok_or_else(|| anyhow!("Connection closed before receiving request"))?;
     let request = RemoteRequest::from_bytes(Vec::from(&buffer[..n]))?;
 
     verbose!("Received remote request: {:?}", request);
@@ -81,7 +87,10 @@ pub async fn client_send_remote_start(
 
 pub async fn server_receive_remote_start(recv_channel: &mut RecvStream) -> Result<()> {
     let mut buffer = [0u8; 1024];
-    let n: usize = recv_channel.read(&mut buffer).await?.unwrap();
+    let n: usize = recv_channel
+        .read(&mut buffer)
+        .await?
+        .ok_or_else(|| anyhow!("Connection closed before receiving remote start"))?;
     let start: String = String::from_utf8_lossy(&buffer[..n]).into();
 
     debug!("Received remote start command: {}", start);
