@@ -117,7 +117,6 @@ def make_chart(data, out_dir):
 
     fig.tight_layout()
     fig.savefig(out_dir / "chisel-bench.png", dpi=150, bbox_inches="tight")
-    fig.savefig(out_dir / "chisel-bench.svg", bbox_inches="tight")
     plt.close(fig)
 
     # Overhead chart — median(rusnel)/median(direct) and median(chisel)/median(direct).
@@ -164,7 +163,6 @@ def make_chart(data, out_dir):
 
     fig2.tight_layout()
     fig2.savefig(out_dir / "overhead.png", dpi=150, bbox_inches="tight")
-    fig2.savefig(out_dir / "overhead.svg", bbox_inches="tight")
     plt.close(fig2)
 
 
@@ -179,8 +177,8 @@ def main():
 
     data = load(results_file)
     make_chart(data, out_dir)
-    print(f"  chisel-bench: {out_dir}/chisel-bench.png, {out_dir}/chisel-bench.svg")
-    print(f"  overhead:     {out_dir}/overhead.png, {out_dir}/overhead.svg")
+    print(f"  chisel-bench: {out_dir}/chisel-bench.png")
+    print(f"  overhead:     {out_dir}/overhead.png")
 
 
 if __name__ == "__main__":
