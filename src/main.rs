@@ -6,7 +6,7 @@ use rusnel::common::quic::Congestion;
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
 use rusnel::embedded::{self, Materialized};
-use rusnel::{run_client, run_server, ClientConfig, ServerConfig, ServerEndpoint};
+use rusnel::{run_client, run_server, ClientConfig, ReconnectConfig, ServerConfig, ServerEndpoint};
 
 /// CLI mirror of `rusnel::common::quic::Congestion`. Kept separate so that
 /// clap's `ValueEnum` derive lives in the binary crate and doesn't pull
@@ -38,13 +38,44 @@ impl From<CongestionArg> for Congestion {
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 use tracing::{debug, info};
+
+/// Parse a non-negative integer number of seconds into a [`Duration`].
+fn parse_duration_secs(s: &str) -> Result<Duration, String> {
+    let secs: u64 = s
+        .parse()
+        .map_err(|e| format!("invalid duration `{s}` (expected whole seconds): {e}"))?;
+    Ok(Duration::from_secs(secs))
+}
+
+/// Convert the raw `--max-retry-count` value (chisel-style: any negative
+/// number means "retry forever") into the [`Option<u32>`] our library API
+/// uses. Kept as a free function rather than a clap `value_parser` because
+/// clap's derive treats `Option<T>`-typed fields as plain optional arguments,
+/// so the parser must return `T`, not `Option<T>`.
+fn max_retries_from_cli(raw: i64) -> Result<Option<u32>, String> {
+    if raw < 0 {
+        Ok(None)
+    } else {
+        u32::try_from(raw)
+            .map(Some)
+            .map_err(|_| format!("retry count `{raw}` is too large"))
+    }
+}
 
 /// Resolve `host:port` to a `ServerEndpoint`, preserving the original host
 /// string so it can be reused as the TLS SNI value (see `client_server_name`).
 /// Used as a clap `value_parser` so resolution failures surface as a
 /// `clap::Error` (consistent formatting + exit code 2) instead of a panic
 /// (#20 §4).
+///
+/// We collect *all* resolved addresses (not just the first), and reorder them
+/// per RFC 8305: alternate address families starting with the resolver's
+/// preferred family. The client races them with Happy Eyeballs so a host like
+/// `localhost` that resolves to both `[::1]` and `127.0.0.1` connects quickly
+/// even when only one family has a listener — matching what curl, `ssh`, and
+/// chisel's Go-based client do out of the box.
 fn parse_server_addr(s: &str) -> Result<ServerEndpoint, String> {
     // Split host:port without losing the host. We do this manually instead of
     // relying on `SocketAddr::from_str` because we want to accept DNS names
@@ -62,13 +93,57 @@ fn parse_server_addr(s: &str) -> Result<ServerEndpoint, String> {
             .to_string()
     };
 
-    let addr = s
+    let resolved: Vec<_> = s
         .to_socket_addrs()
         .map_err(|e| format!("failed to resolve server address `{s}`: {e}"))?
-        .next()
-        .ok_or_else(|| format!("no addresses found for server `{s}`"))?;
+        .collect();
+    if resolved.is_empty() {
+        return Err(format!("no addresses found for server `{s}`"));
+    }
 
-    Ok(ServerEndpoint { addr, host })
+    let addrs = interleave_address_families(resolved);
+    Ok(ServerEndpoint { addrs, host })
+}
+
+/// Reorder resolved addresses per RFC 8305 §4: the first address keeps its
+/// resolver-preferred family, and subsequent addresses alternate families so
+/// the alternate family is reached after a single "Connection Attempt Delay"
+/// regardless of how many same-family addresses come first. With both v4 and
+/// v6 in play this means we always race the *other* family second instead of
+/// burning attempts on every same-family candidate first.
+fn interleave_address_families(resolved: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for a in resolved {
+        if a.is_ipv6() {
+            v6.push(a);
+        } else {
+            v4.push(a);
+        }
+    }
+    // Whichever family the resolver returned first goes first. Falling back
+    // to v4 is irrelevant — empty primary means we just iterate the other
+    // bucket — but we still want a deterministic preference for tests.
+    let (mut primary, mut alternate) = if !v6.is_empty() && !v4.is_empty() {
+        // Both families present: preserve resolver preference (v6 first on
+        // most modern Unix per the default `gai.conf`/RFC 6724 ordering).
+        (v6.into_iter(), v4.into_iter())
+    } else {
+        (v4.into_iter(), v6.into_iter())
+    };
+    let mut out = Vec::new();
+    loop {
+        match (primary.next(), alternate.next()) {
+            (Some(a), Some(b)) => {
+                out.push(a);
+                out.push(b);
+            }
+            (Some(a), None) => out.push(a),
+            (None, Some(b)) => out.push(b),
+            (None, None) => break,
+        }
+    }
+    out
 }
 
 /// Parse a remote spec via `RemoteRequest::from_str`, surfacing parse errors
@@ -254,6 +329,19 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         /// negotiates each direction independently.
         #[arg(long, value_enum, default_value_t = CongestionArg::Cubic)]
         congestion: CongestionArg,
+
+        /// Maximum number of times the client will retry connecting to the
+        /// server after a failed connect or a dropped connection. Pass `-1`
+        /// (the default) to retry forever. The counter resets after every
+        /// successful connection.
+        #[arg(long, value_name = "N", default_value_t = -1, allow_hyphen_values = true)]
+        max_retry_count: i64,
+
+        /// Cap on the exponential reconnect backoff, in seconds. The client
+        /// starts at 200ms and doubles on each successive failure up to this
+        /// value (default 300s, matching chisel).
+        #[arg(long, value_name = "SECONDS", default_value = "300", value_parser = parse_duration_secs)]
+        max_retry_interval: Duration,
 
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
@@ -553,6 +641,8 @@ fn main() {
             tls_key,
             tls_server_name,
             congestion,
+            max_retry_count,
+            max_retry_interval,
             is_verbose,
             is_debug,
         } => {
@@ -581,11 +671,21 @@ fn main() {
                 Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
             };
 
+            let max_retries = match max_retries_from_cli(max_retry_count) {
+                Ok(v) => v,
+                Err(msg) => Args::command().error(ErrorKind::InvalidValue, msg).exit(),
+            };
+            let reconnect = ReconnectConfig {
+                max_retries,
+                max_backoff: max_retry_interval,
+                ..ReconnectConfig::default()
+            };
             let client_config = ClientConfig {
                 server,
                 remotes,
                 tls,
                 congestion: congestion.into(),
+                reconnect,
             };
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
@@ -638,6 +738,41 @@ fn run_cert(action: CertAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    fn v4(p: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, p as u8)), p)
+    }
+    fn v6(p: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, p as u16)), p)
+    }
+
+    #[test]
+    fn interleave_alternates_families_v6_first() {
+        // Resolver returned v6 first (typical macOS / RFC 6724 ordering).
+        let got = interleave_address_families(vec![v6(1), v6(2), v4(3), v4(4)]);
+        assert_eq!(got, vec![v6(1), v4(3), v6(2), v4(4)]);
+    }
+
+    #[test]
+    fn interleave_alternates_families_v4_first() {
+        let got = interleave_address_families(vec![v4(1), v4(2), v6(3), v6(4)]);
+        // Both families present → v6 still goes first per resolver default.
+        assert_eq!(got, vec![v6(3), v4(1), v6(4), v4(2)]);
+    }
+
+    #[test]
+    fn interleave_single_family_preserves_order() {
+        let got = interleave_address_families(vec![v4(1), v4(2), v4(3)]);
+        assert_eq!(got, vec![v4(1), v4(2), v4(3)]);
+        let got = interleave_address_families(vec![v6(1), v6(2)]);
+        assert_eq!(got, vec![v6(1), v6(2)]);
+    }
 }
 
 fn set_log_level(is_verbose: bool, is_debug: bool) {

@@ -1,9 +1,13 @@
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
-use quinn::{Connection, VarInt};
+use futures::stream::{FuturesUnordered, StreamExt};
+use quinn::{Connection, Endpoint, VarInt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tokio::{signal, task};
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::common::quic::{client_server_name, create_client_endpoint};
 use crate::common::remote::{Protocol, RemoteRequest};
@@ -11,45 +15,263 @@ use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::{client_send_remote_request, server_receive_remote_request};
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
-use crate::ClientConfig;
+use crate::{ClientConfig, ReconnectConfig};
 
 pub fn run(config: ClientConfig) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(run_async(config))
 }
 
 pub async fn run_async(config: ClientConfig) -> Result<()> {
-    let endpoint = create_client_endpoint(&config.tls, config.congestion)?;
-
+    let mut endpoints = EndpointPool::new(&config)?;
     let server_name = client_server_name(&config.tls, &config.server.host);
-    info!(
-        "connecting to server at: {} (sni: {})",
-        config.server, server_name
-    );
-    let connection_result = endpoint.connect(config.server.addr, &server_name)?.await;
 
-    let connection = match connection_result {
-        Ok(conn) => {
-            info!("Connected successfully");
-            conn
-        }
-        Err(e) => {
-            return Err(anyhow!("Connection failed: {}", e));
-        }
-    };
-
-    // Create a broadcast channel for shutdown signal
-    let (shutdown_tx, _) = broadcast::channel(1);
-
-    // Spawn a task to listen for ^C
+    // Single ^C listener for the lifetime of the process. Sessions subscribe to
+    // it so a shutdown wins over both an in-progress reconnect sleep and a
+    // running session.
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_tx_clone = shutdown_tx.clone();
     tokio::spawn(async move {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ^C signal");
-        info!("Shutdown signal received. Broadcasting shutdown...");
-        let _ = shutdown_tx_clone.send(());
+        if signal::ctrl_c().await.is_ok() {
+            info!("Shutdown signal received. Broadcasting shutdown...");
+            let _ = shutdown_tx_clone.send(());
+        }
     });
 
+    let result = run_with_reconnect(&mut endpoints, &server_name, &config, &shutdown_tx).await;
+
+    endpoints.wait_idle().await;
+    debug!("Run function completed");
+    result
+}
+
+/// Lazily-initialized pair of QUIC endpoints, one per address family. Happy
+/// Eyeballs may need to race a v4 and v6 connect attempt simultaneously, but
+/// each `quinn::Endpoint` owns a single UDP socket bound to one family, so we
+/// keep one of each and create them on first use. Holding them across
+/// reconnect iterations lets the second-and-later attempts skip the
+/// `Endpoint::client(...)` syscalls.
+struct EndpointPool<'a> {
+    config: &'a ClientConfig,
+    v4: Option<Endpoint>,
+    v6: Option<Endpoint>,
+}
+
+impl<'a> EndpointPool<'a> {
+    fn new(config: &'a ClientConfig) -> Result<Self> {
+        // Validate the TLS config eagerly by building one endpoint up front.
+        // Catches bad cert paths / parse errors at startup instead of after
+        // the first reconnect cycle.
+        let primary = config.server.primary();
+        let endpoint = create_client_endpoint(&config.tls, config.congestion, primary)?;
+        let mut pool = Self {
+            config,
+            v4: None,
+            v6: None,
+        };
+        if primary.is_ipv6() {
+            pool.v6 = Some(endpoint);
+        } else {
+            pool.v4 = Some(endpoint);
+        }
+        Ok(pool)
+    }
+
+    /// Get (or lazily build) the endpoint matching `addr`'s address family.
+    fn get_for(&mut self, addr: SocketAddr) -> Result<&Endpoint> {
+        let slot = if addr.is_ipv6() {
+            &mut self.v6
+        } else {
+            &mut self.v4
+        };
+        if slot.is_none() {
+            *slot = Some(create_client_endpoint(
+                &self.config.tls,
+                self.config.congestion,
+                addr,
+            )?);
+        }
+        Ok(slot.as_ref().expect("endpoint just inserted"))
+    }
+
+    async fn wait_idle(&self) {
+        if let Some(e) = &self.v4 {
+            e.wait_idle().await;
+        }
+        if let Some(e) = &self.v6 {
+            e.wait_idle().await;
+        }
+    }
+}
+
+/// RFC 8305 §8 recommended Connection Attempt Delay between staggered Happy
+/// Eyeballs attempts. 250 ms is the spec-suggested default and what curl,
+/// Chrome, and Go's net package use. Short enough to be invisible on a normal
+/// connect, long enough that we don't fire pointless duplicate handshakes
+/// when the first attempt is just a few RTTs slow.
+const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
+
+/// Outer loop: connect, run a session until it dies, then reconnect with
+/// exponential backoff. Returns once shutdown is signalled, the session
+/// completes cleanly, or `max_retries` is exhausted.
+async fn run_with_reconnect(
+    endpoints: &mut EndpointPool<'_>,
+    server_name: &str,
+    config: &ClientConfig,
+    shutdown_tx: &broadcast::Sender<()>,
+) -> Result<()> {
+    let ReconnectConfig {
+        max_retries,
+        initial_backoff,
+        max_backoff,
+    } = config.reconnect.clone();
+
+    let mut backoff = initial_backoff;
+    let mut attempt: u32 = 0;
+
+    loop {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+
+        info!(
+            "connecting to server at: {} (sni: {})",
+            config.server, server_name
+        );
+
+        let connect_outcome = tokio::select! {
+            res = happy_eyeballs_connect(endpoints, &config.server.addrs, server_name) => Some(res),
+            _ = shutdown_rx.recv() => return Ok(()),
+        };
+
+        match connect_outcome {
+            Some(Ok(connection)) => {
+                info!("Connected successfully");
+                attempt = 0;
+                backoff = initial_backoff;
+
+                let outcome = run_session(connection, config, shutdown_tx).await;
+                match outcome {
+                    SessionOutcome::Shutdown => return Ok(()),
+                    SessionOutcome::Disconnected(reason) => {
+                        warn!("connection lost: {}", reason);
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                warn!("connection attempt failed: {}", e);
+            }
+            None => unreachable!(),
+        }
+
+        attempt = attempt.saturating_add(1);
+        if let Some(max) = max_retries {
+            if attempt > max {
+                return Err(anyhow!(
+                    "giving up after {} reconnect attempt(s)",
+                    attempt - 1
+                ));
+            }
+        }
+
+        info!(
+            "reconnecting in {:?} (attempt {}{})",
+            backoff,
+            attempt,
+            max_retries
+                .map(|m| format!("/{m}"))
+                .unwrap_or_else(|| "".to_string()),
+        );
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = shutdown_rx.recv() => return Ok(()),
+        }
+        backoff = next_backoff(backoff, max_backoff);
+    }
+}
+
+/// RFC 8305 Happy Eyeballs v2 connect: launch one connect attempt per
+/// resolved address, staggered by [`HAPPY_EYEBALLS_DELAY`], and return the
+/// first one that succeeds. The remaining in-flight attempts get cancelled
+/// when the [`FuturesUnordered`] is dropped.
+///
+/// We deliberately do *not* short-circuit when `addrs.len() == 1` so the
+/// happy-path code only has one shape — the FuturesUnordered just resolves
+/// the single future immediately when there's no peer to race against.
+async fn happy_eyeballs_connect(
+    endpoints: &mut EndpointPool<'_>,
+    addrs: &[SocketAddr],
+    server_name: &str,
+) -> Result<Connection> {
+    if addrs.is_empty() {
+        return Err(anyhow!("no candidate addresses to connect to"));
+    }
+
+    // Build all the staggered connecting futures up front. Building them is
+    // cheap (no I/O until polled), so we can pay the cost serially before
+    // entering the race.
+    let mut races = FuturesUnordered::new();
+    let mut last_error: Option<String> = None;
+    for (idx, addr) in addrs.iter().enumerate() {
+        let endpoint = match endpoints.get_for(*addr) {
+            Ok(e) => e.clone(),
+            Err(e) => {
+                last_error = Some(format!("{addr}: failed to build endpoint: {e}"));
+                continue;
+            }
+        };
+        let connecting = match endpoint.connect(*addr, server_name) {
+            Ok(c) => c,
+            Err(e) => {
+                last_error = Some(format!("{addr}: {e}"));
+                continue;
+            }
+        };
+        let stagger = HAPPY_EYEBALLS_DELAY * (idx as u32);
+        let addr = *addr;
+        races.push(async move {
+            if !stagger.is_zero() {
+                tokio::time::sleep(stagger).await;
+            }
+            (addr, connecting.await)
+        });
+    }
+
+    while let Some((addr, res)) = races.next().await {
+        match res {
+            Ok(conn) => {
+                debug!(%addr, "happy eyeballs winner");
+                return Ok(conn);
+            }
+            Err(e) => {
+                debug!(%addr, error = %e, "happy eyeballs candidate failed");
+                last_error = Some(format!("{addr}: {e}"));
+            }
+        }
+    }
+    Err(anyhow!(
+        "all candidate addresses failed (last error: {})",
+        last_error.unwrap_or_else(|| "<none>".into())
+    ))
+}
+
+/// Double the current backoff up to the cap. Returns the cap if `max_backoff`
+/// is shorter than `current` (e.g. caller passed a tiny initial value).
+fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
+    current.saturating_mul(2).min(max_backoff)
+}
+
+enum SessionOutcome {
+    /// User requested shutdown — return cleanly.
+    Shutdown,
+    /// Underlying QUIC connection went away. The caller should reconnect.
+    Disconnected(String),
+}
+
+/// Run one connected session: spawn forward / reverse tunnels and wait for
+/// either the connection to die or shutdown.
+async fn run_session(
+    connection: Connection,
+    config: &ClientConfig,
+    shutdown_tx: &broadcast::Sender<()>,
+) -> SessionOutcome {
     let mut tasks = Vec::new();
 
     for remote in config.remotes.clone() {
@@ -73,35 +295,44 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
         loop {
             let quic_connection = connection_clone.clone();
             if let Err(e) = client_accept_dynamic_reverse_remote(quic_connection).await {
-                error!("reverse tunnel accept error: {}", e);
+                debug!("reverse tunnel accept loop ended: {}", e);
                 break;
             }
         }
         anyhow::Ok(())
     });
-
     tasks.push(accept_reverse_task);
 
-    // Wait for shutdown signal or tasks to finish
     let mut shutdown_rx = shutdown_tx.subscribe();
-    tokio::select! {
+    let outcome = tokio::select! {
         _ = shutdown_rx.recv() => {
-            info!("Shutting down tasks...");
-            // Abort all tasks
-            for handle in tasks {
-                handle.abort();
-            }
+            info!("Shutting down tunnel session and notifying server...");
+            // Close the QUIC connection with a non-zero application code and
+            // a human-readable reason. The server logs this verbatim, so the
+            // operator on the other end sees "client closed (code 130, client
+            // received ^C)" instead of waiting out the idle timeout.
             connection.close(VarInt::from_u32(130), b"client received ^C");
-            endpoint.wait_idle().await;
-            info!("closed connection");
+            // Give quinn a moment to actually flush the CONNECTION_CLOSE
+            // frame before we tear down the endpoint in the caller —
+            // otherwise the close races with `wait_idle` and the server
+            // sometimes only learns about the disconnect via the idle
+            // timeout (which is exactly what we're trying to avoid).
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                connection.closed(),
+            )
+            .await;
+            SessionOutcome::Shutdown
         }
-        _ = futures::future::join_all(tasks.iter_mut()) => {
-            info!("All tasks completed");
+        reason = connection.closed() => {
+            SessionOutcome::Disconnected(reason.to_string())
         }
-    }
+    };
 
-    debug!("Run function completed");
-    Ok(())
+    for handle in tasks {
+        handle.abort();
+    }
+    outcome
 }
 
 async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
