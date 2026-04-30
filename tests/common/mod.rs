@@ -58,6 +58,7 @@ pub fn server_config_with_tls(
         port,
         allow_reverse,
         tls,
+        congestion: Default::default(),
     }
 }
 
@@ -78,6 +79,7 @@ pub fn client_config_with_tls(
         },
         remotes,
         tls,
+        congestion: Default::default(),
     }
 }
 

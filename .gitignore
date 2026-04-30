@@ -1,6 +1,6 @@
 /target
 server_output.txt
 /certs
-/benchmark/*/results/*
-!/benchmark/*/results/*.png
-!/benchmark/*/results/*.svg
+/benchmark/*/results/**
+!/benchmark/*/results/**/
+!/benchmark/*/results/**/*.png

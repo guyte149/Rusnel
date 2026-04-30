@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+use common::quic::Congestion;
 use common::remote::RemoteRequest;
 use common::tls::{ClientTlsConfig, ServerTlsConfig};
 use std::fmt;
@@ -18,6 +19,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub allow_reverse: bool,
     pub tls: ServerTlsConfig,
+    pub congestion: Congestion,
 }
 
 /// The server address the client was asked to connect to. Carries both the
@@ -49,6 +51,7 @@ pub struct ClientConfig {
     pub server: ServerEndpoint,
     pub remotes: Vec<RemoteRequest>,
     pub tls: ClientTlsConfig,
+    pub congestion: Congestion,
 }
 
 pub fn run_server(config: ServerConfig) {

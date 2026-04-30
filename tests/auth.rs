@@ -21,7 +21,7 @@ use rcgen::{
     generate_simple_self_signed, BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair,
     SanType,
 };
-use rusnel::common::quic::create_client_endpoint;
+use rusnel::common::quic::{create_client_endpoint, Congestion};
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{cert_sha256, ClientTlsConfig, ServerTlsConfig};
 use rustls::pki_types::CertificateDer;
@@ -131,10 +131,13 @@ async fn fingerprint_pin_rejects_mismatched_server_cert() {
 
         // Drive the client endpoint manually so we can observe the handshake
         // error without the noise of tunnel setup.
-        let endpoint = create_client_endpoint(&ClientTlsConfig::Fingerprint {
-            sha256: bad_pin,
-            server_name: None,
-        })
+        let endpoint = create_client_endpoint(
+            &ClientTlsConfig::Fingerprint {
+                sha256: bad_pin,
+                server_name: None,
+            },
+            Congestion::default(),
+        )
         .unwrap();
 
         let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
@@ -393,10 +396,13 @@ async fn mtls_rejects_client_with_no_cert() {
         );
         tokio::time::sleep(STARTUP_DELAY).await;
 
-        let endpoint = create_client_endpoint(&ClientTlsConfig::Ca {
-            ca: pki.ca_path.clone(),
-            server_name: Some("127.0.0.1".to_string()),
-        })
+        let endpoint = create_client_endpoint(
+            &ClientTlsConfig::Ca {
+                ca: pki.ca_path.clone(),
+                server_name: Some("127.0.0.1".to_string()),
+            },
+            Congestion::default(),
+        )
         .unwrap();
         let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let result = probe_auth_outcome(
@@ -440,12 +446,15 @@ async fn mtls_rejects_client_signed_by_wrong_ca() {
         );
         tokio::time::sleep(STARTUP_DELAY).await;
 
-        let endpoint = create_client_endpoint(&ClientTlsConfig::Mtls {
-            ca: pki.ca_path.clone(),
-            cert: other.client_cert.clone(),
-            key: other.client_key.clone(),
-            server_name: Some("127.0.0.1".to_string()),
-        })
+        let endpoint = create_client_endpoint(
+            &ClientTlsConfig::Mtls {
+                ca: pki.ca_path.clone(),
+                cert: other.client_cert.clone(),
+                key: other.client_key.clone(),
+                server_name: Some("127.0.0.1".to_string()),
+            },
+            Congestion::default(),
+        )
         .unwrap();
         let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let result = probe_auth_outcome(

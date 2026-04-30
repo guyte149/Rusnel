@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context, Result};
+use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::ServerConfig;
 use quinn::{ClientConfig, Endpoint};
+use quinn::{ServerConfig, TransportConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
@@ -19,22 +20,65 @@ use crate::common::tls::{cert_sha256, format_fingerprint, ClientTlsConfig, Serve
 // passive observers and DPI middleboxes far less likely to flag the traffic.
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"h3"];
 
-pub fn create_server_endpoint(host: IpAddr, port: u16, tls: &ServerTlsConfig) -> Result<Endpoint> {
+/// Congestion control algorithm used by the QUIC transport. Selectable
+/// per-endpoint at startup via `--congestion`.
+///
+/// **CUBIC** (default) is the same algorithm Linux TCP defaults to; it is
+/// loss-based, well-understood, and behaves predictably across the full
+/// range from loopback to lossy WAN. It's the safest default and what
+/// makes Rusnel-vs-Chisel an apples-to-apples comparison.
+///
+/// **BBR** is a model-based controller that estimates the link's
+/// bottleneck bandwidth and round-trip time and paces sending to match.
+/// It typically wins on high-BDP / lossy links (real WAN, satellite,
+/// cellular) where CUBIC takes many RTTs of slow-start to ramp up. The
+/// trade-off: on near-zero-RTT loopback its bandwidth estimator settles
+/// into a low value and *under*paces, so single-stream local throughput
+/// drops noticeably. Pick BBR when latency × bandwidth is non-trivial.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum Congestion {
+    #[default]
+    Cubic,
+    Bbr,
+}
+
+/// Build a `TransportConfig` tuned for tunneling workloads. Used on both
+/// the client and server endpoints — flow-control windows are the
+/// throughput ceiling on a single QUIC stream, and quinn's defaults
+/// (1.25 MB stream / 12.5 MB connection) are conservative for general use
+/// but bottleneck a single bulk TCP forward through the tunnel, especially
+/// on higher-RTT links where the bandwidth-delay product easily exceeds
+/// the default.
+fn build_transport_config(congestion: Congestion) -> Arc<TransportConfig> {
+    let mut tc = TransportConfig::default();
+    tc.stream_receive_window(VarInt::from_u32(16 * 1024 * 1024))
+        .receive_window(VarInt::from_u32(64 * 1024 * 1024))
+        .send_window(64 * 1024 * 1024)
+        .keep_alive_interval(Some(Duration::from_secs(15)));
+    if let Congestion::Bbr = congestion {
+        tc.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    }
+    Arc::new(tc)
+}
+
+pub fn create_server_endpoint(
+    host: IpAddr,
+    port: u16,
+    tls: &ServerTlsConfig,
+    congestion: Congestion,
+) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
 
     let (cert, key) = load_server_identity(tls)?;
     let mut server_config = build_quic_server_config(tls, cert, key)?;
-
-    let transport_config =
-        Arc::get_mut(&mut server_config.transport).expect("Failed to get mutable transport config");
-    // transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
+    server_config.transport_config(build_transport_config(congestion));
 
     Ok(Endpoint::server(server_config, addr)?)
 }
 
-pub fn create_client_endpoint(tls: &ClientTlsConfig) -> Result<Endpoint> {
-    let client_config = build_quic_client_config(tls)?;
+pub fn create_client_endpoint(tls: &ClientTlsConfig, congestion: Congestion) -> Result<Endpoint> {
+    let mut client_config = build_quic_client_config(tls)?;
+    client_config.transport_config(build_transport_config(congestion));
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)

@@ -24,7 +24,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl iperf3 python3 python3-pip \
+       ca-certificates curl iperf3 iproute2 python3 python3-pip \
     && pip3 install --break-system-packages matplotlib numpy \
     && rm -rf /var/lib/apt/lists/*
 

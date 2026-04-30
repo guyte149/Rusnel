@@ -69,7 +69,6 @@ def make_throughput_chart(data, out_dir):
 
     fig.tight_layout()
     fig.savefig(out_dir / "throughput.png", dpi=150, bbox_inches="tight")
-    fig.savefig(out_dir / "throughput.svg", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -129,7 +128,6 @@ def make_latency_chart(data, out_dir):
 
     fig.tight_layout()
     fig.savefig(out_dir / "latency.png", dpi=150, bbox_inches="tight")
-    fig.savefig(out_dir / "latency.svg", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -148,8 +146,8 @@ def main():
     make_throughput_chart(data, out_dir)
     make_latency_chart(data, out_dir)
 
-    print(f"  throughput: {out_dir}/throughput.png, {out_dir}/throughput.svg")
-    print(f"  latency:    {out_dir}/latency.png, {out_dir}/latency.svg")
+    print(f"  throughput: {out_dir}/throughput.png")
+    print(f"  latency:    {out_dir}/latency.png")
 
 
 if __name__ == "__main__":
