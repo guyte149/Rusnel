@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
 use tracing::{debug, debug_span, info, Instrument};
@@ -12,10 +12,17 @@ use crate::common::tunnel::client_send_remote_request;
 
 use super::remote::RemoteRequest;
 
+/// Per-direction copy buffer size. Larger than tokio::io::copy's default 8 KB
+/// so each read/write through quinn batches ~32× more bytes per AEAD call and
+/// per syscall, which is the dominant CPU cost on the data plane.
+/// 256 KB is large enough to amortize the fixed overhead and small enough
+/// to keep memory use bounded under many concurrent connections.
+const TUNNEL_COPY_BUF: usize = 256 * 1024;
+
 pub async fn tunnel_tcp_stream(
     tcp_stream: TcpStream,
     mut send_channel: SendStream,
-    mut recv_channel: RecvStream,
+    recv_channel: RecvStream,
 ) -> Result<()> {
     // Disable Nagle on the TCP leg of the tunnel. Tunneled traffic is opaque
     // to us, so coalescing small writes can deadlock for ~40ms against the
@@ -26,16 +33,23 @@ pub async fn tunnel_tcp_stream(
         debug!("set_nodelay failed: {}", e);
     }
 
-    let (mut tcp_recv, mut tcp_send) = tcp_stream.into_split();
+    let (tcp_recv, mut tcp_send) = tcp_stream.into_split();
+
+    // BufReader+copy_buf gives us a 256 KB transfer chunk size end-to-end
+    // instead of the 8 KB hidden inside tokio::io::copy. (We can't use
+    // copy_bidirectional here because quinn's bi-stream is split into
+    // separate Send/Recv halves, not a single duplex.)
+    let mut tcp_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, tcp_recv);
+    let mut quic_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, recv_channel);
 
     let client_to_server = async {
-        tokio::io::copy(&mut tcp_recv, &mut send_channel).await?;
+        tokio::io::copy_buf(&mut tcp_recv, &mut send_channel).await?;
         send_channel.shutdown().await?;
         Ok::<(), anyhow::Error>(())
     };
 
     let server_to_client = async {
-        tokio::io::copy(&mut recv_channel, &mut tcp_send).await?;
+        tokio::io::copy_buf(&mut quic_recv, &mut tcp_send).await?;
         tcp_send.shutdown().await?;
         Ok::<(), anyhow::Error>(())
     };

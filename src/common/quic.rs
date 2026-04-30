@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::ServerConfig;
 use quinn::{ClientConfig, Endpoint};
+use quinn::{ServerConfig, TransportConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
@@ -19,22 +19,39 @@ use crate::common::tls::{cert_sha256, format_fingerprint, ClientTlsConfig, Serve
 // passive observers and DPI middleboxes far less likely to flag the traffic.
 static ALPN_QUIC_HTTP: &[&[u8]] = &[b"h3"];
 
+/// Build a `TransportConfig` tuned for tunneling workloads. Used on both the
+/// client and server endpoints — flow-control windows are the throughput
+/// ceiling on a single QUIC stream, and quinn's defaults (1.25 MB stream /
+/// 12.5 MB connection) are conservative for general use but bottleneck a
+/// single bulk TCP forward through the tunnel, especially on higher-RTT
+/// links where the bandwidth-delay product easily exceeds the default.
+///
+/// We deliberately stay on the default congestion controller (CUBIC). BBR
+/// is tempting on real WAN links but underperforms badly on near-zero-RTT
+/// loopback where its bandwidth probing settles into a low estimate; CUBIC
+/// is the safer cross-environment default.
+fn build_transport_config() -> Arc<TransportConfig> {
+    let mut tc = TransportConfig::default();
+    tc.stream_receive_window(VarInt::from_u32(16 * 1024 * 1024))
+        .receive_window(VarInt::from_u32(64 * 1024 * 1024))
+        .send_window(64 * 1024 * 1024)
+        .keep_alive_interval(Some(Duration::from_secs(15)));
+    Arc::new(tc)
+}
+
 pub fn create_server_endpoint(host: IpAddr, port: u16, tls: &ServerTlsConfig) -> Result<Endpoint> {
     let addr: SocketAddr = SocketAddr::new(host, port);
 
     let (cert, key) = load_server_identity(tls)?;
     let mut server_config = build_quic_server_config(tls, cert, key)?;
-
-    let transport_config =
-        Arc::get_mut(&mut server_config.transport).expect("Failed to get mutable transport config");
-    // transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
+    server_config.transport_config(build_transport_config());
 
     Ok(Endpoint::server(server_config, addr)?)
 }
 
 pub fn create_client_endpoint(tls: &ClientTlsConfig) -> Result<Endpoint> {
-    let client_config = build_quic_client_config(tls)?;
+    let mut client_config = build_quic_client_config(tls)?;
+    client_config.transport_config(build_transport_config());
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)

@@ -31,10 +31,13 @@ const (
 )
 
 // Sampling parameters. Override via env vars (CHISEL_BENCH_RUNS,
-// CHISEL_BENCH_WARMUP) so CI / local can dial sample count up or down.
+// CHISEL_BENCH_WARMUP, CHISEL_BENCH_MAX_BYTES) so CI / local can dial
+// sample count and payload range up or down. Capping max bytes is
+// important on WAN profiles where 100 MB transfers take many seconds.
 var (
-	runs    = envInt("CHISEL_BENCH_RUNS", 5)
-	warmups = envInt("CHISEL_BENCH_WARMUP", 1)
+	runs     = envInt("CHISEL_BENCH_RUNS", 5)
+	warmups  = envInt("CHISEL_BENCH_WARMUP", 1)
+	maxBytes = envInt("CHISEL_BENCH_MAX_BYTES", 100*MB)
 )
 
 type Result struct {
@@ -79,7 +82,7 @@ func main() {
 
 func benchSizes(tool, port string) []Result {
 	var results []Result
-	for size := 1; size <= 100*MB; size *= 10 {
+	for size := 1; size <= maxBytes; size *= 10 {
 		results = append(results, sampleTunnel(tool, port, size))
 	}
 	return results
@@ -218,7 +221,7 @@ func printSummary(results []Result) {
 		bySize[r.Bytes][r.Tool] = r.Median
 	}
 
-	for size := 1; size <= 100*MB; size *= 10 {
+	for size := 1; size <= maxBytes; size *= 10 {
 		m := bySize[size]
 		fmt.Printf("│ %-8s │ %10.3fms │ %10.3fms │ %10.3fms │\n",
 			fmtBytes(size), m["direct"], m["rusnel"], m["chisel"])

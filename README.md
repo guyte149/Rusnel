@@ -133,19 +133,23 @@ Options:
 ## Performance
 
 Rusnel (QUIC) vs [Chisel](https://github.com/jpillora/chisel) (SSH-over-WebSocket)
-on loopback, measured with iperf3 (throughput, 100MB × 5 runs + warmup, median)
-and 100 echo round-trips for latency:
+on loopback. Throughput is iperf3 over a tunneled TCP forward
+(100 MB × 5 runs + warmup, median); latency is the round-trip time of a
+64 B echo across the tunnel.
 
-![Throughput](benchmark/iperf/results/throughput.png)
-![Latency](benchmark/iperf/results/latency.png)
+![Throughput](benchmark/iperf/results/loopback/throughput.png)
+![Latency](benchmark/iperf/results/loopback/latency.png)
 
 End-to-end HTTP request times through the tunnel across payload sizes
 (median of 5 runs, error bars show min/max):
 
-![HTTP through tunnel](benchmark/chisel-bench/results/chisel-bench.png)
+![HTTP through tunnel](benchmark/chisel-bench/results/loopback/chisel-bench.png)
 
-Reproduce with `./benchmark/run.sh` (requires Docker). See
-[`benchmark/`](benchmark/) for details and tunables.
+The benchmark harness also includes a `wan` profile that applies
+`tc qdisc netem delay 25ms` to the loopback interface to approximate a
+50 ms-RTT WAN. Reproduce everything with `./benchmark/run.sh`
+(requires Docker; needs `--cap-add=NET_ADMIN` for netem profiles, which
+the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 
 ## Authentication
 
