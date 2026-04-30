@@ -18,7 +18,7 @@ pub fn run(config: ClientConfig) -> Result<()> {
 }
 
 pub async fn run_async(config: ClientConfig) -> Result<()> {
-    let endpoint = create_client_endpoint(&config.tls)?;
+    let endpoint = create_client_endpoint(&config.tls, config.congestion)?;
 
     let server_name = client_server_name(&config.tls, &config.server.host);
     info!(

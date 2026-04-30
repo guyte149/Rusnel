@@ -68,6 +68,9 @@ Options:
       --tls-cert <PATH>      Server PEM cert (paired with --tls-key)
       --tls-key  <PATH>      Server PEM key  (paired with --tls-cert)
       --tls-ca   <PATH>      Enable mTLS: require client certs signed by this CA
+      --congestion <CC>      QUIC congestion controller: cubic (default) or bbr.
+                             cubic wins on loopback / clean LANs; bbr wins on
+                             high-BDP / lossy WAN links (≳25ms RTT or any loss).
   -v, --verbose              enable verbose logging
       --debug                enable debug logging
   -h, --help                 Print help
@@ -125,6 +128,9 @@ Options:
       --tls-cert <PATH>           Client PEM cert (mTLS; paired with --tls-key + --tls-ca)
       --tls-key  <PATH>           Client PEM key  (mTLS; paired with --tls-cert + --tls-ca)
       --tls-server-name <NAME>    Override SNI / verification name
+      --congestion <CC>           QUIC congestion controller: cubic (default) or
+                                  bbr. cubic wins on loopback / clean LANs; bbr
+                                  wins on high-BDP / lossy WAN links.
   -v, --verbose                   enable verbose logging
       --debug                     enable debug logging
   -h, --help                      Print help

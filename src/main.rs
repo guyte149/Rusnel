@@ -1,11 +1,40 @@
 use clap::crate_version;
 use clap::error::ErrorKind;
-use clap::{Args as ClapArgs, CommandFactory, Parser, Subcommand};
+use clap::{Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum};
 use rusnel::cert;
+use rusnel::common::quic::Congestion;
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
 use rusnel::embedded::{self, Materialized};
 use rusnel::{run_client, run_server, ClientConfig, ServerConfig, ServerEndpoint};
+
+/// CLI mirror of `rusnel::common::quic::Congestion`. Kept separate so that
+/// clap's `ValueEnum` derive lives in the binary crate and doesn't pull
+/// `clap` into the library.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CongestionArg {
+    /// CUBIC — loss-based, the same algorithm Linux TCP uses by default.
+    /// Fast and predictable on near-zero-RTT loopback and well-tuned LANs.
+    /// Ramps up over many RTTs on high-latency links.
+    #[default]
+    Cubic,
+    /// BBR — model-based, paces sending to the link's bottleneck bandwidth.
+    /// Wins on high-BDP / lossy links (real WAN, satellite, cellular)
+    /// where CUBIC's slow-start is the bottleneck. On near-zero-RTT
+    /// loopback the bandwidth estimator settles low and *under*paces, so
+    /// single-stream local throughput drops noticeably — pick it only
+    /// when latency × bandwidth is non-trivial.
+    Bbr,
+}
+
+impl From<CongestionArg> for Congestion {
+    fn from(c: CongestionArg) -> Self {
+        match c {
+            CongestionArg::Cubic => Congestion::Cubic,
+            CongestionArg::Bbr => Congestion::Bbr,
+        }
+    }
+}
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -111,6 +140,16 @@ enum Mode {
         #[arg(long, value_name = "PATH", requires = "tls_cert", conflicts_with_all = ["insecure", "tls_self_signed"])]
         tls_ca: Option<PathBuf>,
 
+        /// QUIC congestion controller.
+        ///
+        /// `cubic` (default) is the same algorithm Linux TCP uses — predictable
+        /// and fastest on loopback / clean LANs. `bbr` is model-based and wins
+        /// on high-BDP / lossy WAN links where CUBIC slow-start is the
+        /// bottleneck, but underpaces on near-zero-RTT loopback. Pick `bbr`
+        /// when latency × bandwidth is non-trivial (≳25ms RTT or any loss).
+        #[arg(long, value_enum, default_value_t = CongestionArg::Cubic)]
+        congestion: CongestionArg,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -202,6 +241,19 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         /// during verification.
         #[arg(long, value_name = "NAME")]
         tls_server_name: Option<String>,
+
+        /// QUIC congestion controller.
+        ///
+        /// `cubic` (default) is the same algorithm Linux TCP uses — predictable
+        /// and fastest on loopback / clean LANs. `bbr` is model-based and wins
+        /// on high-BDP / lossy WAN links where CUBIC slow-start is the
+        /// bottleneck, but underpaces on near-zero-RTT loopback. Pick `bbr`
+        /// when latency × bandwidth is non-trivial (≳25ms RTT or any loss).
+        ///
+        /// The client and server can run with different controllers; QUIC
+        /// negotiates each direction independently.
+        #[arg(long, value_enum, default_value_t = CongestionArg::Cubic)]
+        congestion: CongestionArg,
 
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
@@ -452,6 +504,7 @@ fn main() {
             tls_cert,
             tls_key,
             tls_ca,
+            congestion,
             is_verbose,
             is_debug,
         } => {
@@ -485,6 +538,7 @@ fn main() {
                 port,
                 allow_reverse,
                 tls,
+                congestion: congestion.into(),
             };
             debug!("Initialized server with config: {:?}", server_config);
             run_server(server_config);
@@ -498,6 +552,7 @@ fn main() {
             tls_cert,
             tls_key,
             tls_server_name,
+            congestion,
             is_verbose,
             is_debug,
         } => {
@@ -530,6 +585,7 @@ fn main() {
                 server,
                 remotes,
                 tls,
+                congestion: congestion.into(),
             };
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
