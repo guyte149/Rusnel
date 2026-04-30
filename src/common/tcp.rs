@@ -17,6 +17,15 @@ pub async fn tunnel_tcp_stream(
     mut send_channel: SendStream,
     mut recv_channel: RecvStream,
 ) -> Result<()> {
+    // Disable Nagle on the TCP leg of the tunnel. Tunneled traffic is opaque
+    // to us, so coalescing small writes can deadlock for ~40ms against the
+    // peer's delayed-ACK timer (classic Nagle/delayed-ACK interaction). All
+    // tunneled TCP — forward, reverse, and SOCKS — flows through here, so
+    // this single call covers every path.
+    if let Err(e) = tcp_stream.set_nodelay(true) {
+        debug!("set_nodelay failed: {}", e);
+    }
+
     let (mut tcp_recv, mut tcp_send) = tcp_stream.into_split();
 
     let client_to_server = async {
