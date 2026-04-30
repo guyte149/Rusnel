@@ -130,6 +130,23 @@ Options:
   -h, --help                      Print help
 ```
 
+## Performance
+
+Rusnel (QUIC) vs [Chisel](https://github.com/jpillora/chisel) (SSH-over-WebSocket)
+on loopback, measured with iperf3 (throughput, 100MB × 5 runs + warmup, median)
+and 100 echo round-trips for latency:
+
+![Throughput](benchmark/iperf/results/throughput.png)
+![Latency](benchmark/iperf/results/latency.png)
+
+End-to-end HTTP request times through the tunnel across payload sizes
+(median of 5 runs, error bars show min/max):
+
+![HTTP through tunnel](benchmark/chisel-bench/results/chisel-bench.png)
+
+Reproduce with `./benchmark/run.sh` (requires Docker). See
+[`benchmark/`](benchmark/) for details and tunables.
+
 ## Authentication
 
 Both the server and the client require an explicit TLS-mode flag — there is
@@ -170,9 +187,9 @@ credentials baked in at compile time are also supported via
 - [x] improve logging by for each tunnel
 - [x] add server tls certificate verification
 - [x] add mutual tls verification
-- [ ] add proxy support for client (client connects to server through a proxy)
-- [ ] add fake-beckend http/3 feature to server
-- [ ] disguise traffic as HTTP/3 to bypass DPI firewalls (ALPN `h3`, default UDP/443, configurable SNI, RFC 9000 QUIC version, optionally CA-signed cert and minimal HTTP/3 facade for active probes)
-- [ ] client reconnect
+- [x] disguise traffic as HTTP/3 to bypass DPI firewalls (ALPN `h3`, default UDP/443, configurable SNI, RFC 9000 QUIC version, optionally CA-signed cert and minimal HTTP/3 facade for active probes)
 - [ ] benchmark performance against chisel (and other tunnel tools, e.g. wstunnel, frp)
+- [ ] client reconnect
+- [ ] add proxy support for client (client connects to server through a proxy)
 - [ ] support UDP over SOCKS5 (UDP ASSOCIATE — currently only CONNECT/TCP is implemented)
+- [ ] add fake-beckend http/3 feature to server
