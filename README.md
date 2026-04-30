@@ -131,10 +131,23 @@ Options:
       --congestion <CC>           QUIC congestion controller: cubic (default) or
                                   bbr. cubic wins on loopback / clean LANs; bbr
                                   wins on high-BDP / lossy WAN links.
+      --max-retry-count <N>       Reconnect attempts after a disconnect or
+                                  failed connect. -1 = retry forever (default);
+                                  counter resets on every successful connect.
+      --max-retry-interval <S>    Cap on the exponential reconnect backoff
+                                  (default 300s; starts at 200 ms and doubles).
   -v, --verbose                   enable verbose logging
       --debug                     enable debug logging
   -h, --help                      Print help
 ```
+
+The client survives both transient network drops and full server restarts
+out of the box: on disconnect it logs the close reason (e.g.
+`closed by peer: server received ^C (code 0)`), backs off, and tries every
+resolved address in parallel using **RFC 8305 Happy Eyeballs** so v4-only
+servers reachable via a v6-preferring resolver still connect within
+~250 ms. Server-side resources (including reverse-tunnel listeners) are
+released the moment the QUIC connection drops.
 
 ## Performance
 
@@ -198,8 +211,25 @@ credentials baked in at compile time are also supported via
 - [x] add server tls certificate verification
 - [x] add mutual tls verification
 - [x] disguise traffic as HTTP/3 to bypass DPI firewalls (ALPN `h3`, default UDP/443, configurable SNI, RFC 9000 QUIC version, optionally CA-signed cert and minimal HTTP/3 facade for active probes)
-- [ ] benchmark performance against chisel (and other tunnel tools, e.g. wstunnel, frp)
-- [ ] client reconnect
-- [ ] add proxy support for client (client connects to server through a proxy)
+- [x] benchmark performance against chisel (see [Performance](#performance) — also benchmark against wstunnel, frp)
+
+### Reliability & UX
+- [x] client reconnect with exponential backoff (configurable via `--max-retry-count` / `--max-retry-interval`)
+- [ ] add proxy support for client (client connects to server through an HTTP/SOCKS proxy)
+- [ ] `RUST_LOG`-style env filter for `tracing-subscriber` (per-module log levels)
+
+### Protocol features
 - [ ] support UDP over SOCKS5 (UDP ASSOCIATE — currently only CONNECT/TCP is implemented)
-- [ ] add fake-beckend http/3 feature to server
+- [ ] add fake-backend http/3 feature to server (real HTTP/3 facade for active probes that open streams)
+- [ ] skip the 1-RTT control handshake on static forwards (cache the parsed `RemoteRequest` server-side; saves ~1 RTT per accepted TCP connection on WAN)
+- [ ] enable QUIC 0-RTT connection resumption (session-ticket cache; cuts the first request after `rusnel client` startup from ~3 RTT to ~1 RTT)
+
+### Data plane performance
+- [ ] single-copy QUIC→TCP data path: replace `tokio::io::copy_buf` with `quinn::RecvStream::read_chunk` to hand quinn's decrypt buffer to the TCP socket without an intermediate copy (~+10–25% throughput, less CPU)
+- [ ] UDP over QUIC datagrams (RFC 9221) instead of length-prefixed reliable streams: removes per-datagram `Vec` alloc, the per-source `Mutex<HashMap>` lookup, the stream open, and the length frame
+- [ ] swap the UDP session map for a lock-free structure (`dashmap` / `papaya`) so the receive loop doesn't serialize on a global mutex under high pps from many sources
+- [ ] apply the same 256 KB `BufReader`/`copy_buf` treatment to the SOCKS5 server-side TCP leg (currently only the static forward path benefits)
+
+### Testing & CI
+- [ ] integration test that asserts `--congestion bbr` actually engages BBR (would catch a future quinn API change)
+- [ ] run `./benchmark/run.sh` on a self-hosted runner per release tag and commit the result PNGs back, so perf regressions surface in PRs

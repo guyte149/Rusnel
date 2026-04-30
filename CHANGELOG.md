@@ -5,6 +5,131 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] - 2026-04-30
+
+Reliability & UX release. The client no longer dies on the first
+disconnect — it reconnects with exponential backoff and races every
+resolved address with Happy Eyeballs. Both ends now log clear,
+immediate disconnect reasons instead of silently waiting out the
+30 s QUIC idle timeout, and the server stops leaking reverse-tunnel
+listeners when a client goes away.
+
+### Added
+
+- Client reconnects automatically with exponential backoff when the QUIC
+  connection drops, instead of exiting on the first disconnect. The same
+  loop also covers initial connect failures, so a client started before
+  the server is up will keep retrying until the server appears. Configurable
+  via two new flags on `rusnel client`, mirroring chisel's reconnect knobs:
+  - `--max-retry-count <N>`: cap reconnect attempts after a failure
+    (default `-1` = unlimited; counter resets on every successful connect).
+  - `--max-retry-interval <SECONDS>`: cap on the exponential backoff
+    sleep between attempts (default `300`s, starting at 200ms and
+    doubling).
+- `ReconnectConfig` is exposed in the public library API as a field on
+  `ClientConfig`, so embedders can tune the same parameters
+  programmatically.
+
+### Fixed
+
+- Server no longer leaks reverse-tunnel listeners when a client
+  disconnects. Per-tunnel work for a connection now runs inside a
+  `tokio::task::JoinSet` whose `shutdown().await` fires the moment
+  `accept_bi` reports the QUIC connection has gone away (`ApplicationClosed`,
+  `LocallyClosed`, `TimedOut`, `Reset`, etc.). Forward tunnels were already
+  self-cleaning because their tasks own a single bi-stream, but reverse
+  tunnels own a long-lived `TcpListener` / `UdpSocket` that previously kept
+  accepting forever against the dead connection — leaving the server-side
+  port bound until the server process exited. New regression test in
+  `tests/disconnect_cleanup.rs` asserts the listener is rebindable within
+  a second of a client `connection.close()`.
+- Both ends now log a clear, immediate disconnect message when the *other*
+  end exits via Ctrl-C, instead of staying silent until QUIC's ~30 s idle
+  timeout fires:
+  - Server installs a `^C` handler that gracefully closes the QUIC
+    endpoint with reason `"server received ^C"`. Connected clients
+    immediately log `connection lost: closed by peer: server received
+    ^C (code 0)` and proceed into the reconnect loop.
+  - Server's per-connection accept loop now decodes the
+    `quinn::ConnectionError` variants (`ApplicationClosed`,
+    `LocallyClosed`, `TimedOut`, `Reset`, …) and logs a human-readable
+    reason at INFO level — previously even a clean client shutdown
+    produced no server-side log because the message was at `debug!`.
+  - Client briefly waits for quinn to flush the `CONNECTION_CLOSE` frame
+    before tearing down its endpoint, so the server reliably sees the
+    close instead of racing with `wait_idle`.
+- Client now races every resolved address with **RFC 8305 Happy Eyeballs
+  v2** instead of giving up on the first one the resolver returned.
+  Previously a hostname that resolved to both A and AAAA records would
+  block on the resolver-preferred family until the full QUIC handshake
+  timeout (~30 s) if only the other family had a listener — which is
+  what happens in the common "client → `localhost:8080` → v6 first → v4
+  server" setup on macOS. The new path:
+  1. `parse_server_addr` collects *all* resolved addresses and reorders
+     them per RFC 8305 §4 (alternate families starting with the
+     resolver-preferred one).
+  2. The client maintains one quinn endpoint per family, lazily.
+  3. On every connect (initial and reconnect), all candidates are raced
+     in parallel, staggered by the spec-recommended 250 ms Connection
+     Attempt Delay. The first successful handshake wins; the others are
+     cancelled.
+  This matches what curl, Chrome, ssh, and chisel's Go-based client do
+  out of the box.
+
+### Changed
+
+- `rusnel::common::quic::create_client_endpoint` now takes the resolved
+  `SocketAddr` of the server as a third argument, so it can pick the
+  matching bind family.
+- `ServerEndpoint.addr: SocketAddr` is now `addrs: Vec<SocketAddr>` to
+  carry all resolved candidates for Happy Eyeballs. A `primary()`
+  accessor returns the first address for callers that want a single
+  representative socket address (logs, tests, etc.). External embedders
+  will need to update construction sites.
+
+## [0.3.6] - 2026-04-30
+
+Performance release. Eliminates a 40 ms latency plateau on tunneled TCP,
+widens QUIC flow-control windows, and ships a reproducible benchmark
+harness so future regressions are visible.
+
+### Added
+
+- `--congestion {cubic,bbr}` flag on both `server` and `client`. CUBIC
+  (default) is loss-based and matches the kernel's TCP behaviour — best on
+  loopback, datacenter, and well-provisioned links. BBR is model-based and
+  paces to the estimated bottleneck bandwidth — significantly better on
+  high-RTT or lossy WAN links where CUBIC under-utilizes the pipe.
+- `TCP_NODELAY` is now set on every tunneled TCP stream (forward, reverse,
+  and SOCKS5 server-side). Removes the ~40 ms Nagle + delayed-ACK stall
+  that was visible in the chisel-bench results for small payloads.
+- Tuned QUIC `TransportConfig` shared by client and server:
+  `stream_receive_window=16 MB`, `receive_window=64 MB`,
+  `send_window=64 MB`, `keep_alive_interval=15 s`. The previous defaults
+  capped a single stream at quinn's conservative ~12 MB BDP.
+- 256 KB `BufReader` + `tokio::io::copy_buf` on the TCP↔QUIC data path,
+  replacing the default 8 KB `tokio::io::copy` buffer. Cuts syscalls and
+  context switches on bulk transfers.
+- Unified benchmark harness under `benchmark/`:
+  - Single multi-stage `Dockerfile` builds Rusnel + a pinned chisel and
+    bundles iperf3, python/matplotlib, and `iproute2` for `tc netem`.
+  - `benchmark/run.sh` (host) builds the image and runs the container with
+    `NET_ADMIN`; `benchmark/run-in-container.sh` orchestrates both
+    benchmarks across `NETEM_PROFILES` (`loopback`, `wan`, `lossy-wan`).
+  - chisel-bench and iperf benchmarks now do warmup runs and report the
+    median of N samples (with min/max error bars in the chisel-bench plot)
+    instead of a single sample.
+- New "Performance" section in the README linking the generated PNGs for
+  loopback throughput, latency, and chisel-bench.
+
+### Changed
+
+- `create_server_endpoint` / `create_client_endpoint` now take a
+  `Congestion` argument; existing call sites (including tests) pass
+  `Congestion::default()` (= CUBIC).
+- Benchmark results layout is now `benchmark/<bench>/results/<profile>/…`
+  to keep loopback and WAN runs separate.
+
 ## [0.3.0] - 2026-04-29
 
 This release introduces layered peer authentication. Both server and client

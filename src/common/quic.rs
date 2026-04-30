@@ -76,10 +76,26 @@ pub fn create_server_endpoint(
     Ok(Endpoint::server(server_config, addr)?)
 }
 
-pub fn create_client_endpoint(tls: &ClientTlsConfig, congestion: Congestion) -> Result<Endpoint> {
+pub fn create_client_endpoint(
+    tls: &ClientTlsConfig,
+    congestion: Congestion,
+    server_addr: SocketAddr,
+) -> Result<Endpoint> {
     let mut client_config = build_quic_client_config(tls)?;
     client_config.transport_config(build_transport_config(congestion));
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    // Bind to a wildcard address in the *same family* as the server we're
+    // trying to reach. quinn's `Endpoint::client("0.0.0.0:0")` convenience
+    // is IPv4-only, so connecting to an IPv6 destination (e.g. `localhost`
+    // resolving to `[::1]` on macOS, which prefers AAAA) returns
+    // `ConnectError::InvalidRemoteAddress` immediately and never even
+    // reaches the reconnect loop. Picking the family from the resolved
+    // server address sidesteps that without forcing platform-specific
+    // dual-stack `IPV6_V6ONLY` setsockopts.
+    let bind_addr: SocketAddr = match server_addr {
+        SocketAddr::V4(_) => "0.0.0.0:0".parse()?,
+        SocketAddr::V6(_) => "[::]:0".parse()?,
+    };
+    let mut endpoint = Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }

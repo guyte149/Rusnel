@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{ClientTlsConfig, ServerTlsConfig};
-use rusnel::{ClientConfig, ServerConfig, ServerEndpoint};
+use rusnel::{ClientConfig, ReconnectConfig, ServerConfig, ServerEndpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -74,12 +74,13 @@ pub fn client_config_with_tls(
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server_port);
     ClientConfig {
         server: ServerEndpoint {
-            addr,
+            addrs: vec![addr],
             host: addr.ip().to_string(),
         },
         remotes,
         tls,
         congestion: Default::default(),
+        reconnect: ReconnectConfig::default(),
     }
 }
 

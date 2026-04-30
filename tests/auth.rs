@@ -131,16 +131,16 @@ async fn fingerprint_pin_rejects_mismatched_server_cert() {
 
         // Drive the client endpoint manually so we can observe the handshake
         // error without the noise of tunnel setup.
+        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let endpoint = create_client_endpoint(
             &ClientTlsConfig::Fingerprint {
                 sha256: bad_pin,
                 server_name: None,
             },
             Congestion::default(),
+            server_addr,
         )
         .unwrap();
-
-        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let connect_result = endpoint.connect(server_addr, "rusnel").unwrap().await;
 
         assert!(
@@ -396,15 +396,16 @@ async fn mtls_rejects_client_with_no_cert() {
         );
         tokio::time::sleep(STARTUP_DELAY).await;
 
+        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let endpoint = create_client_endpoint(
             &ClientTlsConfig::Ca {
                 ca: pki.ca_path.clone(),
                 server_name: Some("127.0.0.1".to_string()),
             },
             Congestion::default(),
+            server_addr,
         )
         .unwrap();
-        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let result = probe_auth_outcome(
             &endpoint,
             server_addr,
@@ -446,6 +447,7 @@ async fn mtls_rejects_client_signed_by_wrong_ca() {
         );
         tokio::time::sleep(STARTUP_DELAY).await;
 
+        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let endpoint = create_client_endpoint(
             &ClientTlsConfig::Mtls {
                 ca: pki.ca_path.clone(),
@@ -454,9 +456,9 @@ async fn mtls_rejects_client_signed_by_wrong_ca() {
                 server_name: Some("127.0.0.1".to_string()),
             },
             Congestion::default(),
+            server_addr,
         )
         .unwrap();
-        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
         let result = probe_auth_outcome(
             &endpoint,
             server_addr,
