@@ -147,8 +147,22 @@ pub async fn start_tunnel(
     allow_reverse: bool,
     remotes: Vec<RemoteRequest>,
 ) -> TestEnv {
+    start_tunnel_with_flags(server_port, allow_reverse, true, remotes).await
+}
+
+/// `start_tunnel`, but with explicit control over the server's
+/// `allow_socks` gate. Use this from tests that exercise the SOCKS5 deny
+/// path (the default `start_tunnel` keeps `allow_socks=true` so existing
+/// SOCKS-using tests keep passing without ceremony).
+pub async fn start_tunnel_with_flags(
+    server_port: u16,
+    allow_reverse: bool,
+    allow_socks: bool,
+    remotes: Vec<RemoteRequest>,
+) -> TestEnv {
     init_crypto();
-    let sc = server_config(server_port, allow_reverse);
+    let mut sc = server_config(server_port, allow_reverse);
+    sc.allow_socks = allow_socks;
     let server_handle = tokio::spawn(async move {
         let _ = rusnel::server::run_async(sc).await;
     });

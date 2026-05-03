@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-05-03
+
+Follow-up to 0.6.0: extend the new `--allow-socks` server gate to cover
+**forward** SOCKS5 in addition to reverse SOCKS5. Previously the flag
+only blocked `R:socks` (because `RemoteKind::Socks5` was the only
+SOCKS-typed thing on the wire); forward `socks` decomposes into
+per-target dynamic `Tcp`/`Udp` remotes that the server couldn't
+distinguish from regular forwards.
+
+### Changed
+
+- **Wire-level `RemoteRequest` gains a `from_socks: bool` field.** Set
+  by `RemoteRequest::dynamic_tcp` / `dynamic_udp` so the per-target
+  dynamic remotes a SOCKS5 client manufactures carry their SOCKS
+  context to the server. `RemoteRequest::is_socks()` now returns `true`
+  for either `kind == Socks5` or `from_socks == true`, so the
+  control-plane gate added in 0.6.0 fires for both directions. Reverse
+  SOCKS5 (`R:socks`) keeps requiring `--allow-reverse` on top of
+  `--allow-socks`, so `R:socks` needs both flags. **This is a breaking
+  wire change — clients and servers must upgrade together** (same
+  protocol bump precedent as 0.4.0). External CLI behaviour is
+  unchanged for static remotes; the new field is `false` for
+  everything except SOCKS-manufactured dynamic remotes.
+- **Behaviour change for forward SOCKS users.** Existing deployments
+  that relied on `socks` working without an explicit flag must add
+  `--allow-socks` to the server invocation when upgrading from 0.6.0.
+
+### Added
+
+- Two regression tests in `tests/edge_cases.rs`:
+  - `test_forward_socks_rejected_when_not_allowed`: client SOCKS
+    listener still binds (the SOCKS handshake is purely client-side),
+    but the per-CONNECT dynamic stream is rejected by the server's
+    `--allow-socks` gate, so the SOCKS5 reply is non-success.
+  - `test_reverse_socks_requires_both_flags`: `--allow-reverse`
+    without `--allow-socks` still rejects `R:socks`.
+- New `start_tunnel_with_flags` helper in `tests/common/mod.rs` for
+  tests that need to override the server's `allow_socks` gate
+  (`start_tunnel` keeps its `allow_socks=true` default so existing
+  SOCKS-using tests don't all need to opt in).
+
+### Notes for downstream embedders
+
+- `RemoteRequest` gains `pub from_socks: bool` (`#[serde(default)]`).
+  Hand-built `RemoteRequest { ... }` literals must add the field; users
+  of `RemoteRequest::new` / `RemoteRequest::from_str` / `dynamic_tcp` /
+  `dynamic_udp` are unaffected.
+
 ## [0.6.0] - 2026-05-03
 
 Two new server/client features from the README roadmap:

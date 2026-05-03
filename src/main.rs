@@ -188,24 +188,20 @@ enum Mode {
         #[arg(long, default_value_t = false)]
         allow_reverse: bool,
 
-        /// Allow clients to request a reverse SOCKS5 dynamic tunnel
-        /// (`R:socks`). When unset (the default), the server rejects
-        /// reverse-SOCKS requests at the control-plane handshake instead
-        /// of binding a local SOCKS listener that exposes the server's
-        /// network to the connecting client. Forward SOCKS (`socks`) is
-        /// driven entirely by the client and is not gated by this flag.
+        /// Allow clients to specify SOCKS5 remotes. `R:socks` additionally requires `--allow-reverse`.
         #[arg(long, default_value_t = false)]
         allow_socks: bool,
 
-        /// Disable all TLS authentication. Uses an ephemeral self-signed
-        /// certificate and accepts any client. MITM-vulnerable; for testing
-        /// only.
+        /// Disable all TLS authentication. MITM-vulnerable; for testing only.
+        ///
+        /// Uses an ephemeral self-signed certificate and accepts any client.
         #[arg(long, default_value_t = false)]
         insecure: bool,
 
-        /// Use a self-signed certificate persisted under --tls-state-dir
-        /// (default: ~/.rusnel). Generated on first run; reused on subsequent
-        /// runs so the fingerprint stays stable.
+        /// Use a self-signed cert persisted under --tls-state-dir (default: ~/.rusnel).
+        ///
+        /// Generated on first run; reused on subsequent runs so the fingerprint
+        /// stays stable.
         #[arg(long, default_value_t = false, conflicts_with_all = ["insecure", "tls_cert", "tls_key"])]
         tls_self_signed: bool,
 
@@ -239,11 +235,11 @@ enum Mode {
         #[arg(long, value_enum, default_value_t = CongestionArg::Cubic)]
         congestion: CongestionArg,
 
-        /// Maximum number of concurrent client connections to accept. Once
-        /// the cap is reached, additional connections are refused at the
-        /// QUIC layer until an existing one closes. `0` (the default) means
-        /// uncapped. quinn's per-connection stream limit still applies on
-        /// top of this.
+        /// Cap on concurrent client connections; `0` (default) = uncapped.
+        ///
+        /// Once the cap is reached, additional connections are refused at the
+        /// QUIC layer until an existing one closes. quinn's per-connection
+        /// stream limit still applies on top of this.
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_connections: usize,
 
@@ -296,7 +292,11 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         R:socks
         R:5000:socks
         1.1.1.1:53/udp
-    
+        [::1]:80
+        [::1]:5000:[2001:db8::1]:80
+
+    IPv6 literals must be wrapped in [brackets] (same convention as URLs and ssh -L).
+
     When the Rusnel server has --allow-reverse enabled, remotes can be prefixed with R to denote that they are reversed.
 
     Remotes can specify "socks" in place of remote-host and remote-port.
@@ -304,21 +304,22 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         "#)]
         remotes: Vec<RemoteRequest>,
 
-        /// Disable server certificate verification. MITM-vulnerable; for
-        /// testing only.
+        /// Disable server certificate verification. MITM-vulnerable; for testing only.
         #[arg(long, default_value_t = false)]
         insecure: bool,
 
-        /// Pin the server's leaf certificate by SHA-256 fingerprint. Accepts
-        /// `sha256:<hex>`, bare hex, or colon-separated hex. The expected
-        /// value is logged by the server at startup as
+        /// Pin the server's leaf certificate by SHA-256 fingerprint.
+        ///
+        /// Accepts `sha256:<hex>`, bare hex, or colon-separated hex. The
+        /// expected value is logged by the server at startup as
         /// `server cert fingerprint: sha256:<hex>`.
         #[arg(long, value_name = "SHA256", conflicts_with_all = ["insecure", "tls_ca"])]
         tls_fingerprint: Option<String>,
 
-        /// Verify the server certificate against this CA bundle. Use alone
-        /// for server-auth-only TLS, or pair with --tls-cert/--tls-key for
-        /// full mTLS.
+        /// Verify the server certificate against this CA bundle.
+        ///
+        /// Use alone for server-auth-only TLS, or pair with --tls-cert/--tls-key
+        /// for full mTLS.
         #[arg(long, value_name = "PATH", conflicts_with = "insecure")]
         tls_ca: Option<PathBuf>,
 
@@ -332,10 +333,11 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         #[arg(long, value_name = "PATH", requires_all = ["tls_cert", "tls_ca"])]
         tls_key: Option<PathBuf>,
 
-        /// Override the SNI / server name sent during the TLS handshake. With
-        /// --tls-ca, this name must match a SAN in the server certificate.
-        /// With --tls-fingerprint, the value is sent as SNI but ignored
-        /// during verification.
+        /// Override the SNI / server name sent during the TLS handshake.
+        ///
+        /// With --tls-ca, this name must match a SAN in the server certificate.
+        /// With --tls-fingerprint, the value is sent as SNI but ignored during
+        /// verification.
         #[arg(long, value_name = "NAME")]
         tls_server_name: Option<String>,
 
@@ -352,26 +354,25 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         #[arg(long, value_enum, default_value_t = CongestionArg::Cubic)]
         congestion: CongestionArg,
 
-        /// Maximum number of times the client will retry connecting to the
-        /// server after a failed connect or a dropped connection. Pass `-1`
-        /// (the default) to retry forever. The counter resets after every
-        /// successful connection.
+        /// Maximum reconnect attempts after a failure; `-1` (default) = retry forever.
+        ///
+        /// The counter resets after every successful connection.
         #[arg(long, value_name = "N", default_value_t = -1, allow_hyphen_values = true)]
         max_retry_count: i64,
 
-        /// Cap on the exponential reconnect backoff, in seconds. The client
-        /// starts at 200ms and doubles on each successive failure up to this
-        /// value (default 300s, matching chisel).
+        /// Cap on the exponential reconnect backoff, in seconds (default 300).
+        ///
+        /// The client starts at 200 ms and doubles on each successive failure
+        /// up to this value (matching chisel).
         #[arg(long, value_name = "SECONDS", default_value = "300", value_parser = parse_duration_secs)]
         max_retry_interval: Duration,
 
-        /// Route the QUIC connection through an outbound proxy. Today only
-        /// SOCKS5 with UDP ASSOCIATE (RFC 1928 §4) is supported — QUIC is
-        /// UDP-based, so HTTP CONNECT cannot carry it. Accepts
-        /// `socks5://[user:pass@]host:port` (`socks://` is an alias). The
-        /// proxy must permit UDP ASSOCIATE; many corporate / hotel HTTP
-        /// proxies do not. A fresh UDP association is opened on every
-        /// (re)connect.
+        /// Route the QUIC connection through a SOCKS5 proxy via UDP ASSOCIATE. Form: `socks5://[user:pass@]host:port`.
+        ///
+        /// `socks://` is accepted as an alias. HTTP CONNECT is not supported
+        /// because it cannot carry UDP/QUIC. The proxy must permit UDP
+        /// ASSOCIATE; many corporate / hotel HTTP proxies do not. A fresh
+        /// UDP association is opened on every (re)connect.
         #[arg(long, value_name = "URL", value_parser = parse_proxy)]
         proxy: Option<ProxyConfig>,
 

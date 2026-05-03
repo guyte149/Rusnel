@@ -62,8 +62,8 @@ Options:
       --host <HOST>          defines Rusnel listening host [default: 0.0.0.0]
   -p, --port <PORT>          defines Rusnel listening port [default: 8080]
       --allow-reverse        Allow clients to specify reverse port forwarding remotes
-      --allow-socks          Allow clients to request reverse SOCKS5 dynamic tunnels
-                             (R:socks). Default-deny; forward `socks` is not gated.
+      --allow-socks          Allow clients to specify SOCKS5 remotes. `R:socks`
+                             additionally requires `--allow-reverse`.
       --insecure             Disable all TLS authentication (testing only)
       --tls-self-signed      Persisted self-signed cert under --tls-state-dir
       --tls-state-dir <DIR>  Directory for persisted self-signed cert/key (default: ~/.rusnel)
@@ -120,9 +120,8 @@ Arguments:
                        [::1]:5000:[2001:db8::1]:80
                        R:[::1]:2222:[::1]:22
 
-                   IPv6 literals must be wrapped in [brackets] so the parser
-                   can disambiguate them from the colon-separated address
-                   format (same convention as URLs and ssh -L).
+                   IPv6 literals must be wrapped in [brackets] (same
+                   convention as URLs and ssh -L).
 
                    When the Rusnel server has --allow-reverse enabled, remotes can be prefixed with R to denote that they are reversed.
 
@@ -145,13 +144,9 @@ Options:
                                   counter resets on every successful connect.
       --max-retry-interval <S>    Cap on the exponential reconnect backoff
                                   (default 300s; starts at 200 ms and doubles).
-      --proxy <URL>               Route the QUIC connection through an outbound
-                                  SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4).
-                                  Form: socks5://[user:pass@]host:port (alias:
-                                  socks://). HTTP CONNECT is intentionally NOT
-                                  supported — it cannot carry UDP/QUIC. The
-                                  proxy must permit UDP ASSOCIATE; many
-                                  corporate / hotel HTTP proxies do not.
+      --proxy <URL>               Route the QUIC connection through a SOCKS5
+                                  proxy via UDP ASSOCIATE.
+                                  Form: socks5://[user:pass@]host:port.
   -v, --verbose                   enable verbose logging
       --debug                     enable debug logging
   -h, --help                      Print help
@@ -195,10 +190,44 @@ rusnel client --tls-ca   ./pki/ca.pem --tls-cert ./pki/client.pem --tls-key ./pk
 ```
 
 `rusnel cert --help` lists the underlying subcommands (`ca`, `server`,
-`client`, `fingerprint`) for finer control. Pre-configured binaries with
-credentials baked in at compile time are also supported via
-`RUSNEL_EMBED_*` env vars — see `build.rs` and the
-[CHANGELOG](CHANGELOG.md) for details.
+`client`, `fingerprint`) for finer control.
+
+### Embedded credentials (drop-and-run binaries)
+
+For Sliver-style "drop the binary onto a host and have it just work" deployments,
+Rusnel can bake credentials and a default server address into the binary at
+**build time** via `RUSNEL_EMBED_*` env vars. The resulting binary runs in the
+appropriate TLS mode with no flags required (CLI flags still override embedded
+values when both are present).
+
+```bash
+# Pre-configured client: connects to 1.2.3.4:8080, fingerprint-pinned.
+RUSNEL_EMBED_SERVER_ADDR=1.2.3.4:8080 \
+RUSNEL_EMBED_FINGERPRINT=sha256:abcd... \
+cargo build --release
+./target/release/rusnel client 1337    # no --tls-* flags needed
+
+# Pre-configured mTLS pair (CA + server cert/key on one binary, CA + client
+# cert/key on the other). Both ends run in mTLS mode with no flags.
+RUSNEL_EMBED_CA=./pki/ca.pem \
+RUSNEL_EMBED_SERVER_CERT=./pki/server.pem \
+RUSNEL_EMBED_SERVER_KEY=./pki/server.key \
+cargo build --release            # → server binary
+
+RUSNEL_EMBED_CA=./pki/ca.pem \
+RUSNEL_EMBED_CLIENT_CERT=./pki/client.pem \
+RUSNEL_EMBED_CLIENT_KEY=./pki/client.key \
+RUSNEL_EMBED_SERVER_NAME=1.2.3.4 \
+cargo build --release            # → client binary
+```
+
+Recognised vars: `RUSNEL_EMBED_SERVER_ADDR`, `RUSNEL_EMBED_CA`,
+`RUSNEL_EMBED_FINGERPRINT`, `RUSNEL_EMBED_SERVER_NAME`,
+`RUSNEL_EMBED_SERVER_CERT`, `RUSNEL_EMBED_SERVER_KEY`,
+`RUSNEL_EMBED_CLIENT_CERT`, `RUSNEL_EMBED_CLIENT_KEY`. Path-style vars are
+resolved at build time via `include_bytes!` (the file no longer needs to exist
+on the deployment host); string-style vars are baked in as `&'static str`.
+See [`build.rs`](build.rs) for the full mapping.
 
 ## Performance
 
