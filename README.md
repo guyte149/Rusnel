@@ -145,13 +145,9 @@ Options:
                                   counter resets on every successful connect.
       --max-retry-interval <S>    Cap on the exponential reconnect backoff
                                   (default 300s; starts at 200 ms and doubles).
-      --proxy <URL>               Route the QUIC connection through an outbound
-                                  SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4).
-                                  Form: socks5://[user:pass@]host:port (alias:
-                                  socks://). HTTP CONNECT is intentionally NOT
-                                  supported — it cannot carry UDP/QUIC. The
-                                  proxy must permit UDP ASSOCIATE; many
-                                  corporate / hotel HTTP proxies do not.
+      --proxy <URL>               Route the QUIC connection through a SOCKS5
+                                  proxy via UDP ASSOCIATE.
+                                  Form: socks5://[user:pass@]host:port.
   -v, --verbose                   enable verbose logging
       --debug                     enable debug logging
   -h, --help                      Print help
