@@ -71,7 +71,7 @@ pub async fn server_receive_remote_request(
     let request: RemoteRequest = read_framed(recv_channel).await?;
     debug!("received remote request: {}", request);
 
-    if request.reversed && !allow_reverse {
+    if request.is_reversed() && !allow_reverse {
         let response =
             RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
         write_framed(send_channel, &response).await?;

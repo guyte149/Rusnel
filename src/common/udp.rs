@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,11 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Sized generously to absorb traffic bursts during the initial RTT it takes
 /// to open the per-source QUIC stream.
 const SESSION_CHANNEL_CAPACITY: usize = 4096;
+
+/// Total bytes the rolling `BytesMut` pool keeps reserved at a time.
+/// Empirically wide enough to amortize allocations when receivers are
+/// keeping up; small enough that we don't keep large idle arenas around.
+const UDP_RECV_POOL_BYTES: usize = MAX_DATAGRAM * 8;
 
 /// Frame one UDP datagram onto a QUIC stream as `u16 length + bytes`. Without
 /// this prefix consecutive datagrams coalesce into a single far-side read and
@@ -126,13 +132,25 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
 
     info!("listening on {}", listen_addr);
 
-    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
+    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let mut buf = vec![0u8; MAX_DATAGRAM];
+    // Rolling `BytesMut` pool. Each iteration extends `recv_buf` back up to
+    // `MAX_DATAGRAM`, reads into it, and hands the populated prefix to the
+    // session as a zero-copy frozen [`Bytes`] via `split_to(...).freeze()`.
+    // The underlying allocation is shared (Arc-refcounted inside `Bytes`),
+    // so once a session has consumed its packet the bytes return to the
+    // pool instead of forcing a fresh allocation per inbound datagram
+    // (#21 §3). When all outstanding handles point into a fully-consumed
+    // arena, `reserve` on the next loop reuses it in place.
+    let mut recv_buf = BytesMut::with_capacity(UDP_RECV_POOL_BYTES);
     loop {
-        let (n, src) = udp_socket.recv_from(&mut buf).await?;
-        let payload = buf[..n].to_vec();
+        if recv_buf.capacity() < MAX_DATAGRAM {
+            recv_buf.reserve(UDP_RECV_POOL_BYTES);
+        }
+        recv_buf.resize(MAX_DATAGRAM, 0);
+        let (n, src) = udp_socket.recv_from(&mut recv_buf[..]).await?;
+        let payload = recv_buf.split_to(n).freeze();
 
         // Look up an existing session, or open a new one for this source.
         let sender = {
@@ -173,8 +191,8 @@ fn spawn_udp_session(
     remote: RemoteRequest,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
-    rx: mpsc::Receiver<Vec<u8>>,
-    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>>,
+    rx: mpsc::Receiver<Bytes>,
+    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>,
 ) {
     tokio::spawn(async move {
         debug!(peer = %source, "opening UDP session");
@@ -191,7 +209,7 @@ async fn run_udp_session(
     remote: RemoteRequest,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut rx: mpsc::Receiver<Bytes>,
 ) -> Result<()> {
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
     client_send_remote_request(&remote, &mut send_channel, &mut recv_channel).await?;
@@ -237,6 +255,7 @@ pub async fn tunnel_udp_server(
 ) -> Result<()> {
     let remote_addr: SocketAddr = request
         .remote_addr_string()
+        .ok_or_else(|| anyhow!("UDP server tunnel requires a host:port remote"))?
         .parse()
         .context("Failed to parse remote address")?;
 

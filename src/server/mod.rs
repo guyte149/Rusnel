@@ -1,14 +1,16 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 
 use quinn::{Connection, ConnectionError, VarInt};
 use tokio::signal;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::common::quic::create_server_endpoint;
-use crate::common::remote::Protocol;
+use crate::common::remote::{Direction, RemoteKind};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::server_receive_remote_request;
@@ -26,6 +28,15 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
     info!("Listening on {}", endpoint.local_addr()?);
 
     let session_counter = AtomicUsize::new(0);
+
+    // Global connection-level cap. `quinn`'s `max_concurrent_bidi_streams`
+    // bounds streams *within* a connection, but a peer can still open
+    // unlimited connections; this `Semaphore` is held for the entire
+    // lifetime of `handle_client_connection` so a misbehaving client can't
+    // exhaust file descriptors or memory by opening connections in a loop
+    // (#17 §3). `None` = uncapped, matching chisel.
+    let connection_limiter: Option<Arc<Semaphore>> =
+        config.max_connections.map(|n| Arc::new(Semaphore::new(n)));
 
     // Race the accept loop against ^C. On signal, gracefully close the
     // endpoint so every connected client receives a CONNECTION_CLOSE frame
@@ -47,7 +58,28 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
             maybe_conn = endpoint.accept() => {
                 let Some(conn) = maybe_conn else { break };
                 let session_id = session_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                let span = info_span!("session", id = session_id, remote = %conn.remote_address());
+                let remote_addr = conn.remote_address();
+                let span = info_span!("session", id = session_id, remote = %remote_addr);
+
+                // Try to claim a connection permit. If the cap is reached,
+                // refuse the new connection rather than queueing it — a
+                // queue would just delay the inevitable client timeout
+                // and let an attacker pile up state on the server.
+                let permit = if let Some(limiter) = &connection_limiter {
+                    match limiter.clone().try_acquire_owned() {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            warn!(
+                                remote = %remote_addr,
+                                "rejecting connection: max-connections cap reached"
+                            );
+                            conn.refuse();
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 let fut = handle_client_connection(conn, config.allow_reverse);
                 tokio::spawn(
@@ -57,6 +89,8 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
                             Ok(reason) => info!("client disconnected: {reason}"),
                             Err(e) => error!("connection failed: {e}"),
                         }
+                        // Permit released here on drop, freeing a slot.
+                        drop(permit);
                     }
                     .instrument(span),
                 );
@@ -159,20 +193,32 @@ async fn handle_remote_stream(
     async {
         info!("tunnel established");
 
-        // Reverse SOCKS is the only special case — it ignores the
-        // (remote_host, remote_port) pair on the request because the actual
-        // target is supplied later, per-connection, by the SOCKS handshake.
-        // Everything else dispatches purely on (reversed, protocol).
-        if request.is_socks() && request.reversed {
-            tunnel_socks_client(quic_connection, request).await?;
-            return Ok(());
-        }
-
-        match (request.reversed, request.protocol) {
-            (false, Protocol::Tcp) => tunnel_tcp_server(recv, send, request).await?,
-            (true, Protocol::Tcp) => tunnel_tcp_client(quic_connection, request).await?,
-            (false, Protocol::Udp) => tunnel_udp_server(recv, send, request).await?,
-            (true, Protocol::Udp) => tunnel_udp_client(quic_connection, request).await?,
+        // Dispatch is now a flat `(direction, kind)` match — the wire type
+        // is unambiguous, no string sentinels, no `_` placeholders. SOCKS5
+        // forward is a configuration error (the tunnel target is decided
+        // by the *client's* per-connection handshake, so the server never
+        // owns a SOCKS listener) and we reject it explicitly.
+        match (request.direction, &request.kind) {
+            (Direction::Forward, RemoteKind::Tcp { .. }) => {
+                tunnel_tcp_server(recv, send, request).await?
+            }
+            (Direction::Reverse, RemoteKind::Tcp { .. }) => {
+                tunnel_tcp_client(quic_connection, request).await?
+            }
+            (Direction::Forward, RemoteKind::Udp { .. }) => {
+                tunnel_udp_server(recv, send, request).await?
+            }
+            (Direction::Reverse, RemoteKind::Udp { .. }) => {
+                tunnel_udp_client(quic_connection, request).await?
+            }
+            (Direction::Reverse, RemoteKind::Socks5 { .. }) => {
+                tunnel_socks_client(quic_connection, request).await?
+            }
+            (Direction::Forward, RemoteKind::Socks5 { .. }) => {
+                return Err(anyhow::anyhow!(
+                    "forward SOCKS5 is a client-side concern; server should not have received this request"
+                ));
+            }
         }
 
         Ok(())

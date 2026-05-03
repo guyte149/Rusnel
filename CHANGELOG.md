@@ -5,7 +5,64 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.8] - 2026-05-03
+## [0.4.0] - 2026-05-03
+
+Follow-up cleanup release closing out the bullets from issue #33 (which
+itself rolled up #17 / #19 / #21 / #22). Primarily an internal refactor;
+the only externally-visible additions are a new `--max-connections`
+server flag and a wire-format version bump that requires client and
+server to upgrade together.
+
+### Added
+
+- `--max-connections N` server flag. Caps the number of concurrent QUIC
+  client connections via a `tokio::sync::Semaphore` whose permit is held
+  for the lifetime of `handle_client_connection`. Surplus connections are
+  refused at the QUIC layer (`Incoming::refuse`) instead of queued, so a
+  misbehaving peer can't exhaust file descriptors or memory by opening
+  connections in a loop. `0` (the default) keeps behaviour uncapped.
+  Closes #17 §3.
+
+### Changed
+
+- **Wire-level `RemoteRequest` is now an unambiguous tagged enum.** The
+  control payload was a single struct that encoded forward/reverse,
+  TCP/UDP, and SOCKS into the same six fields, with SOCKS specifically
+  signalled by the magic pair `remote_host == "socks" && remote_port ==
+  0`. It's now `RemoteRequest { direction: Direction, kind: RemoteKind }`
+  where `RemoteKind` is `Tcp { local, remote } | Udp { local, remote } |
+  Socks5 { local }`. Both dispatchers in `src/server/mod.rs` and
+  `src/client/mod.rs` are now `match` on `(direction, kind)` with no `_`
+  placeholders and no string sentinels. **This is a breaking wire change
+  — clients and servers must upgrade together.** External CLI behaviour
+  is unchanged. Closes #19 §1, #19 §6, #22 §1.
+- `RemoteRequest::from_str` rewritten as a layered parser (direction →
+  protocol → tokens → kind). Each layer is its own free function with a
+  small, testable signature. The previous 150-line nested `match` on
+  token count is gone; the per-arity branches are now individual
+  functions (`parse_one_token`, `parse_two_tokens`, …) and the SOCKS
+  keyword check is centralized. All 25 existing parser tests pass
+  unchanged plus 3 new ones for the helper API. Closes #21 §5.
+- UDP forward client no longer allocates a fresh `Vec` per inbound
+  datagram. The per-source channel is now `mpsc::Sender<bytes::Bytes>`
+  fed from a rolling `BytesMut` arena: `recv_from` writes directly into
+  the arena, `split_to(n).freeze()` hands a zero-copy frozen slice to
+  the session task, and the underlying allocation reverts to the pool
+  once outstanding handles drop. Steady-state allocations drop from
+  O(packets) to O(packets / pool_size). Closes #21 §3.
+
+### Notes
+
+- `clippy::expect_used` and `clippy::panic` remain *not* denied. After
+  the recent cleanup there are exactly three `expect()` sites left, all
+  on infallible invariants (`ServerEndpoint::primary`, the 30 s
+  `IdleTimeout` constant in `src/common/quic.rs`, and `EndpointPool`'s
+  just-inserted slot). Lifting the lints would only force three
+  `#[allow(...)]` annotations; not worth the noise without an explicit
+  "production code never panics" goal. Closes #17 §4 (decision: not
+  worth lifting).
+
+
 
 Small cleanup release: low-risk wins from the open code-quality and
 security review issues (#17, #19, #22).
