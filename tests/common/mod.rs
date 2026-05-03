@@ -9,7 +9,8 @@
 #![allow(dead_code)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Once;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Once, OnceLock};
 use std::time::Duration;
 
 use rusnel::common::remote::RemoteRequest;
@@ -31,17 +32,57 @@ pub fn init_crypto() {
     });
 }
 
-/// Reserve an ephemeral TCP port. There's an inherent TOCTOU race between
-/// closing the probe socket and the test rebinding it, but for localhost
-/// integration tests it is sufficient and matches the existing convention.
+// Test-port allocator.
+//
+// The previous `bind to :0, drop, return port` strategy relied on the
+// kernel not handing the same just-released port back to a sibling test
+// before we re-bound it. Under CI parallelism that assumption is wrong:
+// concurrent tests in the same binary observed identical port numbers,
+// one bound first, the other's `bind` silently failed, and a SOCKS5
+// handshake landed on a plain TCP listener (saw `[5, 1, 0]`).
+//
+// The fix is a strictly monotonic, *atomic* counter scoped to the test
+// process. `fetch_add` guarantees no two callers — concurrent or
+// sequential — ever observe the same offset, so the same port number is
+// never returned twice in a single `cargo test` invocation. We still
+// probe-bind each candidate to skip ports another process happens to
+// hold; with the monotonic counter, an in-use port advances the cursor
+// past it on every retry instead of looping in place.
+//
+// Starting offset is seeded from the PID so parallel `cargo test`
+// invocations on the same host don't all start at the same place.
+const PORT_RANGE_START: u16 = 40_000;
+const PORT_RANGE_SPAN: u16 = 20_000; // → 40_000 .. 60_000
+
+static PORT_OFFSET: AtomicU32 = AtomicU32::new(0);
+static PORT_BASE: OnceLock<u32> = OnceLock::new();
+
+fn next_port_candidate() -> u16 {
+    let base = *PORT_BASE.get_or_init(|| (std::process::id() % PORT_RANGE_SPAN as u32));
+    let off = PORT_OFFSET.fetch_add(1, Ordering::Relaxed);
+    PORT_RANGE_START + ((base + off) % PORT_RANGE_SPAN as u32) as u16
+}
+
+/// Reserve a TCP port that is *both* unique to this test run and currently
+/// bindable. The atomic counter rules out in-process collisions; the bind
+/// probe rules out a number some other process on the host happens to be
+/// using. Loops until a free port is found — in practice one iteration.
 pub fn get_available_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    loop {
+        let port = next_port_candidate();
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 pub fn get_available_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    socket.local_addr().unwrap().port()
+    loop {
+        let port = next_port_candidate();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 pub fn server_config(port: u16, allow_reverse: bool) -> ServerConfig {
