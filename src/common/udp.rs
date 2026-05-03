@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use bytes::{Bytes, BytesMut};
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::common::tunnel::client_send_remote_request;
@@ -38,7 +38,7 @@ const UDP_RECV_POOL_BYTES: usize = MAX_DATAGRAM * 8;
 /// Frame one UDP datagram onto a QUIC stream as `u16 length + bytes`. Without
 /// this prefix consecutive datagrams coalesce into a single far-side read and
 /// get re-emitted as one oversized datagram (see issue #18 §3).
-async fn write_datagram(send: &mut SendStream, payload: &[u8]) -> Result<()> {
+pub(crate) async fn write_datagram(send: &mut SendStream, payload: &[u8]) -> Result<()> {
     let len = u16::try_from(payload.len())
         .map_err(|_| anyhow!("UDP datagram of {} bytes exceeds 65535", payload.len()))?;
     send.write_all(&len.to_le_bytes()).await?;
@@ -48,7 +48,10 @@ async fn write_datagram(send: &mut SendStream, payload: &[u8]) -> Result<()> {
 
 /// Read one length-prefixed datagram into `buf`, returning the slice that
 /// holds the actual payload. `buf` must be at least `MAX_DATAGRAM` bytes.
-async fn read_datagram<'a>(recv: &mut RecvStream, buf: &'a mut [u8]) -> Result<&'a [u8]> {
+pub(crate) async fn read_datagram<'a>(
+    recv: &mut RecvStream,
+    buf: &'a mut [u8],
+) -> Result<&'a [u8]> {
     let mut len_buf = [0u8; 2];
     recv.read_exact(&mut len_buf).await?;
     let len = u16::from_le_bytes(len_buf) as usize;
@@ -132,8 +135,10 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
 
     info!("listening on {}", listen_addr);
 
-    let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    // DashMap (sharded RwLock) replaces a single global Mutex<HashMap> so the
+    // per-source lookup on every received datagram doesn't serialize the
+    // receive loop under high pps from many sources.
+    let sessions: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>> = Arc::new(DashMap::new());
 
     // Rolling `BytesMut` pool. Each iteration extends `recv_buf` back up to
     // `MAX_DATAGRAM`, reads into it, and hands the populated prefix to the
@@ -153,19 +158,19 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
         let payload = recv_buf.split_to(n).freeze();
 
         // Look up an existing session, or open a new one for this source.
-        let sender = {
-            let mut map = sessions.lock().await;
-            // Drop the entry if its session has already terminated.
-            if let Some(tx) = map.get(&src) {
-                if tx.is_closed() {
-                    map.remove(&src);
-                }
+        // Drop the entry if its session has already terminated.
+        let mut existing = sessions.get(&src).map(|e| e.value().clone());
+        if let Some(tx) = &existing {
+            if tx.is_closed() {
+                sessions.remove(&src);
+                existing = None;
             }
-            if let Some(tx) = map.get(&src) {
-                tx.clone()
-            } else {
+        }
+        let sender = match existing {
+            Some(tx) => tx,
+            None => {
                 let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
-                map.insert(src, tx.clone());
+                sessions.insert(src, tx.clone());
                 spawn_udp_session(
                     quic_connection.clone(),
                     remote.clone(),
@@ -192,14 +197,14 @@ fn spawn_udp_session(
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     rx: mpsc::Receiver<Bytes>,
-    sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>,
+    sessions: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>>,
 ) {
     tokio::spawn(async move {
         debug!(peer = %source, "opening UDP session");
         if let Err(e) = run_udp_session(quic_connection, remote, udp_socket, source, rx).await {
             warn!(peer = %source, "UDP session ended: {}", e);
         }
-        sessions.lock().await.remove(&source);
+        sessions.remove(&source);
         debug!(peer = %source, "UDP session removed");
     });
 }
