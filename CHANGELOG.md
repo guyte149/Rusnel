@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-03
+
+Two new server/client features from the README roadmap:
+
+### Added
+
+- **`--allow-socks` server flag**. Default-deny gate for reverse-SOCKS5
+  remotes (`R:socks` / `R:port:socks`). Without the flag the server now
+  rejects reverse-SOCKS requests at the control-plane handshake instead
+  of silently spinning up a local SOCKS listener that exposes the
+  server's network to the connecting client. Mirrors the existing
+  `--allow-reverse` semantics. Forward SOCKS (`socks`) decomposes into
+  per-target dynamic TCP/UDP requests on the wire and is *not* gated by
+  this flag — see the README's "Security & access control" roadmap for
+  the planned full ACL story (per-cert allow/deny patterns).
+- **`--proxy` client flag** for routing the QUIC connection through a
+  SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4). Accepts
+  `socks5://[user:pass@]host:port` (`socks://` is an alias). HTTP
+  CONNECT is intentionally not supported in this release because it
+  cannot carry UDP — see the "WebSocket fallback transport" roadmap
+  bullet for the path that would unlock HTTP/SOCKS-CONNECT proxies.
+  - New `rusnel::common::proxy` module: `ProxyConfig` parser, SOCKS5
+    UDP ASSOCIATE handshake (no-auth and RFC 1929 user/pass), and a
+    `Socks5UdpSocket` adapter implementing `quinn::AsyncUdpSocket` that
+    wraps every outbound QUIC datagram in the SOCKS5 UDP framing
+    (`RSV/FRAG/ATYP/DST.ADDR/DST.PORT`) and unwraps every inbound one.
+  - `create_client_endpoint_via_proxy` builds a single-use QUIC
+    endpoint with the wrapped socket via
+    `Endpoint::new_with_abstract_socket`. The TCP control connection is
+    held open inside the socket for the lifetime of the relay (RFC
+    1928 §6); reconnects open a fresh association.
+  - The client bypasses Happy Eyeballs and the cross-attempt endpoint
+    pool when proxied (the proxy owns routing; each retry needs a
+    fresh association anyway), and instead re-runs the SOCKS5
+    handshake on every connect / reconnect.
+  - 10 unit tests in `src/common/proxy.rs` (URL parser corner cases,
+    SOCKS5 UDP wrap/unwrap roundtrips, fragment/ATYP rejection paths)
+    plus `tests/proxy.rs` — an integration test that stands up an
+    in-process SOCKS5 UDP relay and asserts a Rusnel client connects
+    through it, completes the QUIC handshake, and round-trips bytes
+    over a tunneled TCP echo.
+
+### Notes for downstream embedders
+
+- `ServerConfig` gains `pub allow_socks: bool`. `false` is safe-by-default
+  (matches the `--allow-reverse` precedent); existing embedders relying
+  on reverse-SOCKS need to set `allow_socks: true`.
+- `ClientConfig` gains `pub proxy: Option<ProxyConfig>`. `None` =
+  direct connect (existing behaviour).
+- `server_receive_remote_request` gains an `allow_socks: bool` parameter
+  alongside the existing `allow_reverse`. Wire format unchanged.
+
 ## [0.5.0] - 2026-05-03
 
 Adds SOCKS5 UDP ASSOCIATE (UDP over SOCKS5) and one data-plane scalability

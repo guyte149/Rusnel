@@ -62,6 +62,8 @@ Options:
       --host <HOST>          defines Rusnel listening host [default: 0.0.0.0]
   -p, --port <PORT>          defines Rusnel listening port [default: 8080]
       --allow-reverse        Allow clients to specify reverse port forwarding remotes
+      --allow-socks          Allow clients to request reverse SOCKS5 dynamic tunnels
+                             (R:socks). Default-deny; forward `socks` is not gated.
       --insecure             Disable all TLS authentication (testing only)
       --tls-self-signed      Persisted self-signed cert under --tls-state-dir
       --tls-state-dir <DIR>  Directory for persisted self-signed cert/key (default: ~/.rusnel)
@@ -143,6 +145,13 @@ Options:
                                   counter resets on every successful connect.
       --max-retry-interval <S>    Cap on the exponential reconnect backoff
                                   (default 300s; starts at 200 ms and doubles).
+      --proxy <URL>               Route the QUIC connection through an outbound
+                                  SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4).
+                                  Form: socks5://[user:pass@]host:port (alias:
+                                  socks://). HTTP CONNECT is intentionally NOT
+                                  supported — it cannot carry UDP/QUIC. The
+                                  proxy must permit UDP ASSOCIATE; many
+                                  corporate / hotel HTTP proxies do not.
   -v, --verbose                   enable verbose logging
       --debug                     enable debug logging
   -h, --help                      Print help
@@ -213,30 +222,28 @@ The benchmark harness also includes a `wan` profile that applies
 the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 
 ## TODO
-- [x] write tests in rust for tcp, udp, reverse and socks
-- [x] improve logging by for each tunnel
-- [x] add server tls certificate verification
-- [x] add mutual tls verification
-- [x] disguise traffic as HTTP/3 to bypass DPI firewalls (ALPN `h3`, default UDP/443, configurable SNI, RFC 9000 QUIC version, optionally CA-signed cert and minimal HTTP/3 facade for active probes)
-- [x] benchmark performance against chisel (see [Performance](#performance) — also benchmark against wstunnel, frp)
 
 ### Reliability & UX
 - [x] client reconnect with exponential backoff (configurable via `--max-retry-count` / `--max-retry-interval`)
-- [ ] add proxy support for client (client connects to server through an HTTP/SOCKS proxy)
+- [x] proxy support for client: `--proxy socks5://[user:pass@]host:port` routes the QUIC connection through a SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4). HTTP CONNECT is intentionally not supported in this release because it cannot carry UDP — see the WebSocket-fallback transport item under `Security & access control` for the path that would unlock HTTP/SOCKS-CONNECT proxies.
 - [ ] `RUST_LOG`-style env filter for `tracing-subscriber` (per-module log levels)
 
 ### Protocol features
-- [x] support UDP over SOCKS5 (UDP ASSOCIATE) — both forward (`socks`) and reverse (`R:socks`)
 - [ ] add fake-backend http/3 feature to server (real HTTP/3 facade for active probes that open streams)
 - [ ] skip the 1-RTT control handshake on static forwards (cache the parsed `RemoteRequest` server-side; saves ~1 RTT per accepted TCP connection on WAN)
 - [ ] enable QUIC 0-RTT connection resumption (session-ticket cache; cuts the first request after `rusnel client` startup from ~3 RTT to ~1 RTT)
+- [ ] UDP hole-punching / NAT traversal mode: introduce a `rusnel broker` role that observes each peer's reflexive address (optionally cross-checked against public STUN servers to detect symmetric NAT) and brokers a direct QUIC connection between two NATed peers à la libp2p DCUtR / Tailscale DERP, with relay fallback when punching fails. Lets two devices behind NAT talk without anyone running a publicly-reachable data-plane server.
 
-### Data plane performance
-- [x] swap the UDP session map for a sharded lock-free structure (`dashmap`) so the receive loop doesn't serialize on a global mutex under high pps from many sources
-- [x] 256 KB `BufReader`/`copy_buf` is applied to every tunneled TCP leg, including SOCKS5 CONNECT — all three paths share `tunnel_tcp_stream`
-- [ ] single-copy QUIC→TCP data path via `quinn::RecvStream::read_chunk` (tried in 0.5.0; per-chunk syscall overhead regressed loopback throughput ~40 % vs `BufReader`+`copy_buf` because chunks are small — revisit when quinn exposes a vectored `Bytes`-returning read API)
-- [ ] UDP over QUIC datagrams (RFC 9221) instead of length-prefixed reliable streams: removes per-datagram `Vec` alloc, the per-source map lookup, the stream open, and the length frame
+### Security & access control
+- [ ] server-side remote ACLs: `--allow` / `--deny` flags (and config-file equivalents) accepting wildcarded `RemoteRequest` patterns, e.g. `--allow socks`, `--allow R:2222:localhost:22`, `--deny tcp:*:*:169.254.169.254:*`. Default-deny dangerous targets like cloud instance-metadata endpoints. With mTLS, bind ACLs to the client cert subject / fingerprint so a contractor cert can be scoped to one tunnel.
+- [ ] SSO / OIDC client auth via a `rusnel-issuer` daemon: client runs `rusnel client --sso https://issuer.corp.example`, completes a device-code flow against the org's IdP (Okta/Google/Auth0), and the issuer mints a short-lived (~8h) mTLS client cert with the user's email/groups in the SAN. Rusnel server only needs to trust the issuer's CA — no IdP knowledge in the data path. ACLs from the bullet above match on cert subject/groups.
+
+### Operability
+- [ ] server admin API + CLI + web UI:
+  - typed `ServerState` (DashMap of clients/tunnels with bytes-in/out counters) populated from the existing per-connection / per-tunnel handlers.
+  - HTTP admin API on a unix socket (filesystem-perm gated) or TCP+mTLS: `GET /clients`, `GET /clients/:id/tunnels`, `GET /tunnels`, `DELETE /clients/:id` (kick), `GET /metrics` (Prometheus).
+  - `rusnel ctl clients|tunnels|kick` subcommand consuming that API.
+  - tiny embedded web UI (single `include_str!`'d HTML file, no JS framework) with a client/tunnel dashboard and bandwidth sparklines off `/metrics`.
 
 ### Testing & CI
-- [ ] integration test that asserts `--congestion bbr` actually engages BBR (would catch a future quinn API change)
 - [ ] run `./benchmark/run.sh` on a self-hosted runner per release tag and commit the result PNGs back, so perf regressions surface in PRs

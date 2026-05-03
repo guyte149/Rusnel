@@ -119,7 +119,7 @@ async fn handle_test_stream(
 ) {
     use rusnel::common::tcp::tunnel_tcp_server;
     use rusnel::common::tunnel::server_receive_remote_request;
-    let request = match server_receive_remote_request(&mut send, &mut recv, false).await {
+    let request = match server_receive_remote_request(&mut send, &mut recv, false, false).await {
         Ok(r) => r,
         Err(e) => {
             info!("control handshake failed: {e}");

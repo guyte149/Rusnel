@@ -9,7 +9,9 @@ use tokio::sync::broadcast;
 use tokio::{signal, task};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::common::quic::{client_server_name, create_client_endpoint};
+use crate::common::quic::{
+    client_server_name, create_client_endpoint, create_client_endpoint_via_proxy,
+};
 use crate::common::remote::{Direction, RemoteKind, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
@@ -18,7 +20,17 @@ use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{ClientConfig, ReconnectConfig};
 
 pub async fn run_async(config: ClientConfig) -> Result<()> {
-    let mut endpoints = EndpointPool::new(&config)?;
+    // Direct connections share QUIC endpoints across reconnects (one per
+    // address family) so we don't pay the bind-syscall cost on every retry.
+    // SOCKS5-proxied connections can't share — each retry requires a fresh
+    // UDP ASSOCIATE — so the pool is built lazily per attempt instead.
+    let mut endpoints = match &config.proxy {
+        None => Some(EndpointPool::new(&config)?),
+        Some(p) => {
+            info!("routing QUIC through proxy: {p}");
+            None
+        }
+    };
     let server_name = client_server_name(&config.tls, &config.server.host);
 
     // Single ^C listener for the lifetime of the process. Sessions subscribe to
@@ -33,9 +45,11 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
         }
     });
 
-    let result = run_with_reconnect(&mut endpoints, &server_name, &config, &shutdown_tx).await;
+    let result = run_with_reconnect(endpoints.as_mut(), &server_name, &config, &shutdown_tx).await;
 
-    endpoints.wait_idle().await;
+    if let Some(pool) = endpoints.as_ref() {
+        pool.wait_idle().await;
+    }
     debug!("Run function completed");
     result
 }
@@ -110,7 +124,7 @@ const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 /// exponential backoff. Returns once shutdown is signalled, the session
 /// completes cleanly, or `max_retries` is exhausted.
 async fn run_with_reconnect(
-    endpoints: &mut EndpointPool<'_>,
+    endpoints: Option<&mut EndpointPool<'_>>,
     server_name: &str,
     config: &ClientConfig,
     shutdown_tx: &broadcast::Sender<()>,
@@ -123,6 +137,7 @@ async fn run_with_reconnect(
 
     let mut backoff = initial_backoff;
     let mut attempt: u32 = 0;
+    let mut endpoints = endpoints;
 
     loop {
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -132,8 +147,23 @@ async fn run_with_reconnect(
             config.server, server_name
         );
 
+        // Two connect strategies: direct (Happy Eyeballs across all resolved
+        // addresses, sharing QUIC endpoints across attempts) or via SOCKS5
+        // proxy (single fresh UDP ASSOCIATE, single address — the proxy
+        // handles routing). We dispatch here rather than threading an enum
+        // through `happy_eyeballs_connect` because the proxy path is simple
+        // enough that a parallel function reads more clearly.
         let connect_outcome = tokio::select! {
-            res = happy_eyeballs_connect(endpoints, &config.server.addrs, server_name) => Some(res),
+            res = async {
+                if let Some(proxy) = &config.proxy {
+                    proxied_connect(proxy, config, server_name).await
+                } else {
+                    let pool = endpoints
+                        .as_deref_mut()
+                        .expect("endpoint pool is built when no proxy is configured");
+                    happy_eyeballs_connect(pool, &config.server.addrs, server_name).await
+                }
+            } => Some(res),
             _ = shutdown_rx.recv() => return Ok(()),
         };
 
@@ -248,6 +278,34 @@ async fn happy_eyeballs_connect(
     ))
 }
 
+/// SOCKS5-proxied connect: do a fresh UDP ASSOCIATE handshake against the
+/// proxy, build a one-shot QUIC endpoint that wraps every datagram in SOCKS5
+/// UDP framing, and connect to the (proxy-relayed) server. Happy Eyeballs is
+/// not applicable here — the proxy is responsible for routing to the
+/// destination, so we just use the first resolved address as the SOCKS5
+/// `DST.ADDR` / `DST.PORT`.
+async fn proxied_connect(
+    proxy: &crate::common::proxy::ProxyConfig,
+    config: &ClientConfig,
+    server_name: &str,
+) -> Result<Connection> {
+    let server = config
+        .server
+        .addrs
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("no candidate addresses to connect to"))?;
+    debug!(
+        target = %server,
+        proxy = %proxy,
+        "establishing SOCKS5 UDP ASSOCIATE for QUIC connection",
+    );
+    let endpoint =
+        create_client_endpoint_via_proxy(&config.tls, config.congestion, server, proxy).await?;
+    let connection = endpoint.connect(server, server_name)?.await?;
+    Ok(connection)
+}
+
 /// Double the current backoff up to the cap. Returns the cap if `max_backoff`
 /// is shorter than `current` (e.g. caller passed a tiny initial value).
 fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
@@ -355,7 +413,8 @@ async fn client_accept_dynamic_reverse_remote(quic_connection: Connection) -> Re
     let (mut send, mut recv) = stream;
 
     tokio::spawn(async move {
-        let dynamic_remote = server_receive_remote_request(&mut send, &mut recv, true).await?;
+        let dynamic_remote =
+            server_receive_remote_request(&mut send, &mut recv, true, true).await?;
         let remote_display = dynamic_remote.to_string();
 
         async {
