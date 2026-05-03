@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, Endpoint};
-use quinn::{ServerConfig, TransportConfig, VarInt};
+use quinn::{IdleTimeout, ServerConfig, TransportConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
@@ -51,10 +51,27 @@ pub enum Congestion {
 /// the default.
 fn build_transport_config(congestion: Congestion) -> Arc<TransportConfig> {
     let mut tc = TransportConfig::default();
+    // 30 s idle timeout pairs with the 15 s keep-alive: a peer that goes
+    // silent (network drop, hard kill) is reaped after at most two missed
+    // keep-alives instead of relying on quinn's default of "never time out".
+    // Without this the server-side connection table grows unboundedly under
+    // half-open connections — a trivial DoS vector noted in #17 §3.
+    let idle_timeout = IdleTimeout::try_from(Duration::from_secs(30))
+        .expect("30s fits in QUIC idle-timeout VarInt");
+    // Cap concurrent streams per QUIC connection. Without a cap a single
+    // peer can open unlimited bi-streams (one accept_bi() per stream → one
+    // tunnel task), which is a trivial memory / fd DoS vector noted in
+    // #17 §3. 1024 is well above any legitimate use (each tunnel is at most
+    // one stream; each SOCKS connection is one stream) and still bounds
+    // worst-case resource use. We never open uni-streams, so cap them at 0
+    // to fail-fast if a future change accidentally opens one.
     tc.stream_receive_window(VarInt::from_u32(16 * 1024 * 1024))
         .receive_window(VarInt::from_u32(64 * 1024 * 1024))
         .send_window(64 * 1024 * 1024)
-        .keep_alive_interval(Some(Duration::from_secs(15)));
+        .keep_alive_interval(Some(Duration::from_secs(15)))
+        .max_idle_timeout(Some(idle_timeout))
+        .max_concurrent_bidi_streams(VarInt::from_u32(1024))
+        .max_concurrent_uni_streams(VarInt::from_u32(0));
     if let Congestion::Bbr = congestion {
         tc.congestion_controller_factory(Arc::new(BbrConfig::default()));
     }

@@ -67,8 +67,11 @@ pub async fn tunnel_tcp_stream(
 }
 
 pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
-    let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
-    let listener = TcpListener::bind(&local_addr).await?;
+    // Use SocketAddr's Display so IPv6 literals come out bracketed
+    // (`[::1]:8080`) — a manual `format!("{ip}:{port}")` on an IPv6
+    // `IpAddr` produces `::1:8080`, which `TcpListener::bind` rejects.
+    let local_addr = remote.local_socket_addr();
+    let listener = TcpListener::bind(local_addr).await?;
     info!("listening on {}", local_addr);
 
     let conn_counter = AtomicUsize::new(0);
@@ -100,7 +103,7 @@ pub async fn tunnel_tcp_server(
     send_channel: SendStream,
     request: RemoteRequest,
 ) -> Result<()> {
-    let remote_addr = format!("{}:{}", request.remote_host, request.remote_port);
+    let remote_addr = request.remote_addr_string();
     debug!("connecting to {}", remote_addr);
     let tcp_stream = TcpStream::connect(&remote_addr).await?;
     debug!("connected to {}", remote_addr);

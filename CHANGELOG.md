@@ -5,6 +5,88 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-05-03
+
+Small cleanup release: low-risk wins from the open code-quality and
+security review issues (#17, #19, #22).
+
+### Added
+
+- IPv6 remote support, end to end. Address strings now accept bracketed
+  IPv6 literals anywhere a host can appear:
+  - `[::1]:80` — bind on the IPv4 wildcard, forward to `::1:80`.
+  - `8080:[2001:db8::1]:443` — local IPv4 port, IPv6 upstream.
+  - `[::1]:5000:[2001:db8::1]:80/udp` — full IPv6 quadruple.
+  - `[::1]:1080:socks` and `R:[::1]:5000:[2001:db8::1]:80` — SOCKS and
+    reverse variants.
+  Bracketing is required (same convention as URLs and `ssh -L`) so the
+  parser can tell `[::1]:80` apart from a colon-separated quadruple.
+  The TCP/UDP/SOCKS listen paths now use `SocketAddr::new(local_host,
+  local_port)` to bind, which renders IPv6 correctly as `[::1]:port`,
+  and the UDP server binds the upstream socket in the matching family
+  (`[::]:0` vs `0.0.0.0:0`) so IPv6 targets don't fail with
+  `AddressFamilyNotSupported`. New helpers `RemoteRequest::is_socks`,
+  `local_socket_addr`, and `remote_addr_string` centralize the
+  formatting. Closes #19 §5.
+- New `tests/ipv6.rs` integration suite — TCP and UDP echo over a
+  tunneled `[::1]:port:[::1]:port` remote — and 10 new unit tests in
+  `src/common/remote.rs` covering the bracket tokenizer, every IPv6
+  shape (host:port, local_port:remote, full quadruple, socks, reverse,
+  unbracketed → still rejected, mismatched/missing brackets).
+- 15 unit tests (already shipped earlier in this release) for
+  `RemoteRequest::from_str` covering every documented IPv4 format and
+  the rejection paths. Closes the highest-ROI gap from #22 §7.
+
+### Changed
+
+- QUIC `TransportConfig` now sets `max_idle_timeout = 30 s`,
+  `max_concurrent_bidi_streams = 1024`, and
+  `max_concurrent_uni_streams = 0` on both ends. Previously these were
+  left at quinn's defaults — no idle timeout, unlimited streams —
+  meaning a single peer could open arbitrary numbers of streams (one
+  tunnel task each) and a half-open peer (network drop, hard kill, or
+  attacker) would sit in the connection table indefinitely. Together
+  with the existing 15 s `keep_alive_interval`, a silent peer is now
+  reaped after at most two missed keep-alives. Addresses the DoS
+  exposure noted in #17 §3.
+- `Protocol` now derives `Copy` (and `PartialEq`/`Eq`) so it stops
+  forcing `.clone()` on every dispatch site (#22 §8).
+- The two UDP pump loops are now standalone `async fn` helpers
+  (`pump_socket_to_stream` / `pump_stream_to_socket`) instead of inline
+  `async move` blocks ending in an unreachable `Ok(())`. The four
+  `#[allow(unreachable_code)]` markers in `src/common/udp.rs` are gone:
+  with a proper return type the never-terminating `loop {}` cleanly
+  coerces to `Result<()>` via `!` (#22 §5).
+
+### Fixed
+
+- Typo in client-side error log: `"an error occured"` → `"an error
+  occurred"` (#22 §3).
+
+### Removed
+
+- Unused `RemoteRequest::new` constructor; the two SOCKS handshake call
+  sites now use struct-init syntax directly (#22 §5).
+- `server::run` and `client::run` synchronous wrappers — both built a
+  fresh tokio runtime per call, which was a footgun for embedders
+  (`run` inside an async context = panic). The runtime is now built
+  once at the binary entry point in `lib::run_server` /
+  `lib::run_client`, and `server::run_async` / `client::run_async` are
+  the canonical async entry points (which is what the integration
+  tests already use). Addresses #19 §3.
+
+### Internal
+
+- New `RemoteRequest::is_socks()` helper centralizes the
+  `remote_host == "socks" && remote_port == 0` sentinel check that
+  used to be open-coded at every dispatch site. The dispatchers in
+  `server/mod.rs` and `client/mod.rs` are also flattened: the six-field
+  `RemoteRequest { _, _, _, _, reversed, protocol }` match arms with
+  every field as `_` are replaced by a small `match (reversed,
+  protocol)`. Net ~80 lines deleted, and the dispatch is now exhaustive
+  without `_` placeholders. Partial fix for #19 §1 / #22 §1; the wire
+  format is unchanged.
+
 ## [0.3.7] - 2026-04-30
 
 Reliability & UX release. The client no longer dies on the first

@@ -17,10 +17,6 @@ use crate::common::tunnel::{client_send_remote_request, server_receive_remote_re
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{ClientConfig, ReconnectConfig};
 
-pub fn run(config: ClientConfig) -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(run_async(config))
-}
-
 pub async fn run_async(config: ClientConfig) -> Result<()> {
     let mut endpoints = EndpointPool::new(&config)?;
     let server_name = client_server_name(&config.tls, &config.server.host);
@@ -336,56 +332,24 @@ async fn run_session(
 }
 
 async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
-    match remote {
-        // socks
-        RemoteRequest {
-            local_host: _,
-            local_port: _,
-            remote_host: ref remote_host_ref,
-            remote_port: 0,
-            reversed: false,
-            protocol: Protocol::Tcp,
-        } if remote_host_ref == "socks" => {
-            tunnel_socks_client(quic_connection, remote).await?;
-        }
+    // Reverse remotes only register interest with the server here — actual
+    // tunnel data flows back through `client_accept_dynamic_reverse_remote`
+    // when the server opens a stream for an inbound connection.
+    if remote.reversed {
+        let (mut send, mut recv) = quic_connection.open_bi().await?;
+        client_send_remote_request(&remote, &mut send, &mut recv).await?;
+        send.shutdown().await?;
+        return Ok(());
+    }
 
-        // simple forward TCP
-        RemoteRequest {
-            local_host: _,
-            local_port: _,
-            remote_host: _,
-            remote_port: _,
-            reversed: false,
-            protocol: Protocol::Tcp,
-        } => {
-            tunnel_tcp_client(quic_connection, remote).await?;
-        }
+    if remote.is_socks() {
+        tunnel_socks_client(quic_connection, remote).await?;
+        return Ok(());
+    }
 
-        // simple forward UDP
-        RemoteRequest {
-            local_host: _,
-            local_port: _,
-            remote_host: _,
-            remote_port: _,
-            reversed: false,
-            protocol: Protocol::Udp,
-        } => {
-            tunnel_udp_client(quic_connection, remote).await?;
-        }
-
-        // reverse remote
-        RemoteRequest {
-            local_host: _,
-            local_port: _,
-            remote_host: _,
-            remote_port: _,
-            reversed: true,
-            protocol: _,
-        } => {
-            let (mut send, mut recv) = quic_connection.open_bi().await?;
-            client_send_remote_request(&remote, &mut send, &mut recv).await?;
-            send.shutdown().await? // finish - the main loop will get a dynamic remote connection
-        }
+    match remote.protocol {
+        Protocol::Tcp => tunnel_tcp_client(quic_connection, remote).await?,
+        Protocol::Udp => tunnel_udp_client(quic_connection, remote).await?,
     }
     Ok(())
 }
