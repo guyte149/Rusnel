@@ -59,6 +59,7 @@ pub fn server_config_with_tls(
         allow_reverse,
         tls,
         congestion: Default::default(),
+        max_connections: None,
     }
 }
 

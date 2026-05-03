@@ -225,6 +225,14 @@ enum Mode {
         #[arg(long, value_enum, default_value_t = CongestionArg::Cubic)]
         congestion: CongestionArg,
 
+        /// Maximum number of concurrent client connections to accept. Once
+        /// the cap is reached, additional connections are refused at the
+        /// QUIC layer until an existing one closes. `0` (the default) means
+        /// uncapped. quinn's per-connection stream limit still applies on
+        /// top of this.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        max_connections: usize,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -593,6 +601,7 @@ fn main() {
             tls_key,
             tls_ca,
             congestion,
+            max_connections,
             is_verbose,
             is_debug,
         } => {
@@ -627,6 +636,11 @@ fn main() {
                 allow_reverse,
                 tls,
                 congestion: congestion.into(),
+                max_connections: if max_connections == 0 {
+                    None
+                } else {
+                    Some(max_connections)
+                },
             };
             debug!("Initialized server with config: {:?}", server_config);
             run_server(server_config);

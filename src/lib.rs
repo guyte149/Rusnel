@@ -21,6 +21,12 @@ pub struct ServerConfig {
     pub allow_reverse: bool,
     pub tls: ServerTlsConfig,
     pub congestion: Congestion,
+    /// Maximum number of concurrent client *connections* the server will
+    /// accept. `quinn`'s `max_concurrent_bidi_streams` only bounds streams
+    /// inside a single connection — without this cap a peer could open
+    /// unlimited connections and exhaust file descriptors / memory. `None`
+    /// means uncapped (the default; matches chisel's behaviour).
+    pub max_connections: Option<usize>,
 }
 
 /// The server address the client was asked to connect to. Carries the full

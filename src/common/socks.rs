@@ -6,9 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, debug_span, error, info, Instrument};
 
-use crate::common::remote;
-
-use super::remote::RemoteRequest;
+use super::remote::{HostPort, RemoteRequest};
 use super::tcp::tunnel_tcp_stream;
 use super::tunnel::client_send_remote_request;
 use anyhow::{anyhow, Result};
@@ -100,42 +98,25 @@ async fn socks_handshake(
         return Err(anyhow!("Unsupported SOCKS command: {}", buf[1]));
     }
 
-    let dynamic_remote = match buf[3] {
+    let target = match buf[3] {
         0x01 => {
-            // IPv4
             let mut addr = [0u8; 4];
             conn.read_exact(&mut addr).await?;
             let mut port = [0u8; 2];
             conn.read_exact(&mut port).await?;
-            let port = u16::from_be_bytes(port);
-            let remote_address = Ipv4Addr::from(addr).to_string();
-            RemoteRequest {
-                local_host: original_remote.local_host,
-                local_port: original_remote.local_port,
-                remote_host: remote_address,
-                remote_port: port,
-                reversed: original_remote.reversed,
-                protocol: remote::Protocol::Tcp,
-            }
+            HostPort::new(Ipv4Addr::from(addr).to_string(), u16::from_be_bytes(port))
         }
         0x03 => {
-            // Domain name
             let mut len = [0u8; 1];
             conn.read_exact(&mut len).await?;
             let mut domain = vec![0u8; len[0] as usize];
             conn.read_exact(&mut domain).await?;
             let mut port = [0u8; 2];
             conn.read_exact(&mut port).await?;
-            let port = u16::from_be_bytes(port);
-            let domain = String::from_utf8_lossy(&domain).into_owned();
-            RemoteRequest {
-                local_host: original_remote.local_host,
-                local_port: original_remote.local_port,
-                remote_host: domain,
-                remote_port: port,
-                reversed: original_remote.reversed,
-                protocol: remote::Protocol::Tcp,
-            }
+            HostPort::new(
+                String::from_utf8_lossy(&domain).into_owned(),
+                u16::from_be_bytes(port),
+            )
         }
         _ => {
             conn.write_all(&[0x05, 0x08]).await?;
@@ -143,5 +124,5 @@ async fn socks_handshake(
         }
     };
 
-    Ok(dynamic_remote)
+    Ok(original_remote.dynamic_tcp(target))
 }

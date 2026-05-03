@@ -16,7 +16,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 
-use rusnel::common::remote::RemoteRequest;
+use rusnel::common::remote::{RemoteKind, RemoteRequest};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
@@ -61,8 +61,14 @@ async fn tcp_forward_over_ipv6() {
 
     let remote_str = format!("[::1]:{local_port}:[::1]:{upstream_port}");
     let remote = RemoteRequest::from_str(&remote_str).unwrap();
-    assert_eq!(remote.local_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
-    assert_eq!(remote.remote_host, "::1");
+    assert_eq!(
+        remote.local_socket_addr().ip(),
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    );
+    match &remote.kind {
+        RemoteKind::Tcp { remote: hp, .. } => assert_eq!(hp.host, "::1"),
+        _ => panic!("expected TCP remote"),
+    }
 
     let _env = start_tunnel(server_port, false, vec![remote]).await;
 

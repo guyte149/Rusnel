@@ -103,7 +103,9 @@ pub async fn tunnel_tcp_server(
     send_channel: SendStream,
     request: RemoteRequest,
 ) -> Result<()> {
-    let remote_addr = request.remote_addr_string();
+    let remote_addr = request
+        .remote_addr_string()
+        .ok_or_else(|| anyhow::anyhow!("TCP server tunnel requires a host:port remote"))?;
     debug!("connecting to {}", remote_addr);
     let tcp_stream = TcpStream::connect(&remote_addr).await?;
     debug!("connected to {}", remote_addr);

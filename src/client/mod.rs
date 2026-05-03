@@ -10,7 +10,7 @@ use tokio::{signal, task};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::common::quic::{client_server_name, create_client_endpoint};
-use crate::common::remote::{Protocol, RemoteRequest};
+use crate::common::remote::{Direction, RemoteKind, RemoteRequest};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::{client_send_remote_request, server_receive_remote_request};
@@ -335,21 +335,17 @@ async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest
     // Reverse remotes only register interest with the server here — actual
     // tunnel data flows back through `client_accept_dynamic_reverse_remote`
     // when the server opens a stream for an inbound connection.
-    if remote.reversed {
+    if remote.is_reversed() {
         let (mut send, mut recv) = quic_connection.open_bi().await?;
         client_send_remote_request(&remote, &mut send, &mut recv).await?;
         send.shutdown().await?;
         return Ok(());
     }
 
-    if remote.is_socks() {
-        tunnel_socks_client(quic_connection, remote).await?;
-        return Ok(());
-    }
-
-    match remote.protocol {
-        Protocol::Tcp => tunnel_tcp_client(quic_connection, remote).await?,
-        Protocol::Udp => tunnel_udp_client(quic_connection, remote).await?,
+    match &remote.kind {
+        RemoteKind::Socks5 { .. } => tunnel_socks_client(quic_connection, remote).await?,
+        RemoteKind::Tcp { .. } => tunnel_tcp_client(quic_connection, remote).await?,
+        RemoteKind::Udp { .. } => tunnel_udp_client(quic_connection, remote).await?,
     }
     Ok(())
 }
@@ -364,22 +360,19 @@ async fn client_accept_dynamic_reverse_remote(quic_connection: Connection) -> Re
 
         async {
             info!("reverse tunnel established");
-            match dynamic_remote {
-                RemoteRequest {
-                    reversed: true,
-                    protocol: Protocol::Tcp,
-                    ..
-                } => {
+            match (dynamic_remote.direction, &dynamic_remote.kind) {
+                (Direction::Reverse, RemoteKind::Tcp { .. }) => {
                     tunnel_tcp_server(recv, send, dynamic_remote).await?;
                 }
-                RemoteRequest {
-                    reversed: true,
-                    protocol: Protocol::Udp,
-                    ..
-                } => {
+                (Direction::Reverse, RemoteKind::Udp { .. }) => {
                     tunnel_udp_server(recv, send, dynamic_remote).await?;
                 }
-                _ => error!("received dynamic remote that is not reversed!"),
+                (Direction::Reverse, RemoteKind::Socks5 { .. }) => {
+                    error!("server pushed a reverse SOCKS5 dynamic remote — should be Tcp/Udp");
+                }
+                (Direction::Forward, _) => {
+                    error!("received dynamic remote that is not reversed!")
+                }
             }
             anyhow::Ok(())
         }
