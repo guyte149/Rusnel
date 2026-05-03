@@ -62,10 +62,8 @@ Options:
       --host <HOST>          defines Rusnel listening host [default: 0.0.0.0]
   -p, --port <PORT>          defines Rusnel listening port [default: 8080]
       --allow-reverse        Allow clients to specify reverse port forwarding remotes
-      --allow-socks          Allow clients to use SOCKS5 dynamic tunnels —
-                             both forward (`socks`) and reverse (`R:socks`).
-                             Default-deny. `R:socks` additionally requires
-                             `--allow-reverse`.
+      --allow-socks          Allow clients to specify SOCKS5 remotes. `R:socks`
+                             additionally requires `--allow-reverse`.
       --insecure             Disable all TLS authentication (testing only)
       --tls-self-signed      Persisted self-signed cert under --tls-state-dir
       --tls-state-dir <DIR>  Directory for persisted self-signed cert/key (default: ~/.rusnel)

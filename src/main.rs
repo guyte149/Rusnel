@@ -188,12 +188,7 @@ enum Mode {
         #[arg(long, default_value_t = false)]
         allow_reverse: bool,
 
-        /// Allow clients to use SOCKS5 dynamic tunnels — both forward
-        /// (`socks`, where the client runs the SOCKS5 listener locally and
-        /// the server connects out to whatever target the SOCKS client
-        /// asked for) and reverse (`R:socks`, where the server runs the
-        /// SOCKS5 listener exposing the server's network to the client).
-        /// Default-deny. `R:socks` additionally requires `--allow-reverse`.
+        /// Allow clients to specify SOCKS5 remotes. `R:socks` additionally requires `--allow-reverse`.
         #[arg(long, default_value_t = false)]
         allow_socks: bool,
 
