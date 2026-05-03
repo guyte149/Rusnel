@@ -292,7 +292,12 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         R:socks
         R:5000:socks
         1.1.1.1:53/udp
-    
+        [::1]:80
+        [::1]:5000:[2001:db8::1]:80
+
+    IPv6 literals must be wrapped in [brackets] (same convention as URLs and ssh -L)
+    so the parser can disambiguate them from the colon-separated address format.
+
     When the Rusnel server has --allow-reverse enabled, remotes can be prefixed with R to denote that they are reversed.
 
     Remotes can specify "socks" in place of remote-host and remote-port.
