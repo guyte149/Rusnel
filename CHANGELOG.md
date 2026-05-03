@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-03
+
+Adds SOCKS5 UDP ASSOCIATE (UDP over SOCKS5) and one data-plane scalability
+fix from the README's perf TODO list (sharded UDP session map).
+
+### Added
+
+- **SOCKS5 UDP ASSOCIATE** (RFC 1928 §6, CMD=0x03). Both forward (`socks`)
+  and reverse (`R:socks`) dynamic tunnels now relay UDP traffic in addition
+  to TCP CONNECT. The SOCKS server binds a UDP socket, returns its address
+  in the BND.ADDR/BND.PORT reply, parses the SOCKS5 UDP datagram header on
+  every received packet, and tunnels the inner payload through a per
+  (source, target) QUIC bi-stream. Replies are wrapped back into SOCKS5
+  UDP framing and sent to the original UDP source. Per-session lifetime is
+  tied to the TCP control connection (closing it tears the relay down) and
+  to a 60 s idle timeout. IPv4, IPv6, and domain-name targets are all
+  supported in both directions. Fragmented datagrams (FRAG ≠ 0) are
+  rejected — same as virtually every other SOCKS5 implementation in the
+  wild. New integration tests cover the forward and reverse paths against
+  a localhost UDP echo server.
+- IPv6 SOCKS5 CONNECT targets (ATYP=0x04). Previously rejected with
+  "address type not supported"; now decoded into a `HostPort` and tunneled
+  the same way IPv4/domain targets are. The pre-existing edge-case test
+  was updated to use a genuinely unknown ATYP (0x05).
+
+### Changed
+
+- UDP forward client's per-source session table swapped from
+  `Arc<Mutex<HashMap<SocketAddr, _>>>` to `Arc<DashMap<SocketAddr, _>>`.
+  The receive loop hits the table on every inbound datagram; under high
+  pps from many sources the global mutex was the next obvious bottleneck.
+  DashMap shards internally so per-key lookups proceed in parallel.
+
+### Notes for downstream embedders
+
+- `RemoteRequest::dynamic_udp(target)` is the new UDP analog of
+  `dynamic_tcp` and is used by the SOCKS5 UDP relay to manufacture a
+  per-target dynamic UDP remote.
+- `HostPort` now derives `Hash` so it can key a `DashMap`.
+- The wire format is unchanged from 0.4.0: existing 0.4.0 servers and
+  clients interop with 0.5.0 peers.
+
 ## [0.4.0] - 2026-05-03
 
 Follow-up cleanup release closing out the bullets from issue #33 (which

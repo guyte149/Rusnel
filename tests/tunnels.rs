@@ -7,10 +7,12 @@
 
 mod common;
 
+use std::net::SocketAddrV4;
 use std::str::FromStr;
 
 use common::{
-    get_available_port, get_available_udp_port, socks5_connect_ipv4, start_tunnel, TEST_TIMEOUT,
+    get_available_port, get_available_udp_port, socks5_connect_ipv4, socks5_udp_associate,
+    socks5_udp_unwrap_ipv4, socks5_udp_wrap_ipv4, start_tunnel, TEST_TIMEOUT,
 };
 use rusnel::common::remote::RemoteRequest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -229,6 +231,102 @@ async fn test_socks5_forward() {
     })
     .await
     .expect("test_socks5_forward timed out");
+}
+
+#[tokio::test]
+async fn test_socks5_udp_associate_forward() {
+    timeout(TEST_TIMEOUT, async {
+        let server_port = get_available_port();
+        let socks_port = get_available_port();
+        let target_port = get_available_udp_port();
+
+        // Echo target on the server end of the tunnel: we send a datagram
+        // through SOCKS5 UDP ASSOCIATE → tunnel → this socket, then echo
+        // back to the source so the client side asserts the round-trip.
+        let target_socket = UdpSocket::bind(format!("127.0.0.1:{target_port}"))
+            .await
+            .unwrap();
+        let target_handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1500];
+            let (n, peer) = target_socket.recv_from(&mut buf).await.unwrap();
+            target_socket.send_to(&buf[..n], peer).await.unwrap();
+        });
+
+        let remote = RemoteRequest::from_str(&format!("127.0.0.1:{socks_port}:socks")).unwrap();
+        let _env = start_tunnel(server_port, false, vec![remote]).await;
+
+        let (_ctrl, relay_addr) = socks5_udp_associate(&format!("127.0.0.1:{socks_port}")).await;
+
+        let local = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = SocketAddrV4::new([127, 0, 0, 1].into(), target_port);
+        let payload = b"hello from socks udp associate";
+        let wire = socks5_udp_wrap_ipv4(target, payload);
+        local.send_to(&wire, relay_addr).await.unwrap();
+
+        let mut buf = vec![0u8; 1500];
+        let (n, from) = tokio::time::timeout(TEST_TIMEOUT, local.recv_from(&mut buf))
+            .await
+            .expect("did not receive SOCKS5 UDP reply")
+            .unwrap();
+        assert_eq!(from, relay_addr, "reply must come from the SOCKS UDP relay");
+
+        let (ip, port, body) = socks5_udp_unwrap_ipv4(&buf[..n]);
+        assert_eq!(ip, [127, 0, 0, 1]);
+        assert_eq!(port, target_port);
+        assert_eq!(body, payload);
+
+        target_handle.await.unwrap();
+    })
+    .await
+    .expect("test_socks5_udp_associate_forward timed out");
+}
+
+#[tokio::test]
+async fn test_socks5_udp_associate_reverse() {
+    timeout(TEST_TIMEOUT, async {
+        let server_port = get_available_port();
+        let socks_port = get_available_port();
+        let target_port = get_available_udp_port();
+
+        // Reverse SOCKS: server runs the SOCKS listener; client side
+        // (where we *also* run the target socket because reverse means the
+        // tunnel egress is the rusnel client) does the actual UDP send.
+        let target_socket = UdpSocket::bind(format!("127.0.0.1:{target_port}"))
+            .await
+            .unwrap();
+        let target_handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1500];
+            let (n, peer) = target_socket.recv_from(&mut buf).await.unwrap();
+            target_socket.send_to(&buf[..n], peer).await.unwrap();
+        });
+
+        let remote = RemoteRequest::from_str(&format!("R:127.0.0.1:{socks_port}:socks")).unwrap();
+        let _env = start_tunnel(server_port, true, vec![remote]).await;
+
+        let (_ctrl, relay_addr) = socks5_udp_associate(&format!("127.0.0.1:{socks_port}")).await;
+
+        let local = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = SocketAddrV4::new([127, 0, 0, 1].into(), target_port);
+        let payload = b"hello via reverse socks udp";
+        let wire = socks5_udp_wrap_ipv4(target, payload);
+        local.send_to(&wire, relay_addr).await.unwrap();
+
+        let mut buf = vec![0u8; 1500];
+        let (n, from) = tokio::time::timeout(TEST_TIMEOUT, local.recv_from(&mut buf))
+            .await
+            .expect("did not receive reverse SOCKS5 UDP reply")
+            .unwrap();
+        assert_eq!(from, relay_addr);
+
+        let (ip, port, body) = socks5_udp_unwrap_ipv4(&buf[..n]);
+        assert_eq!(ip, [127, 0, 0, 1]);
+        assert_eq!(port, target_port);
+        assert_eq!(body, payload);
+
+        target_handle.await.unwrap();
+    })
+    .await
+    .expect("test_socks5_udp_associate_reverse timed out");
 }
 
 #[tokio::test]

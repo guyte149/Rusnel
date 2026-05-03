@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Once, OnceLock};
 use std::time::Duration;
@@ -202,6 +202,79 @@ pub async fn socks5_connect_ipv4(
     assert_eq!(reply[1], 0x00, "SOCKS reply status (0x00 = success)");
 
     conn
+}
+
+/// Perform a SOCKS5 no-auth handshake + UDP ASSOCIATE. Returns the still-open
+/// TCP control connection (must be kept alive for the lifetime of the
+/// association — closing it tears the relay down) and the UDP relay address
+/// the SOCKS server bound for our datagrams.
+pub async fn socks5_udp_associate(socks_addr: &str) -> (TcpStream, SocketAddr) {
+    let mut conn = TcpStream::connect(socks_addr).await.unwrap();
+
+    conn.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    let mut greet_resp = [0u8; 2];
+    conn.read_exact(&mut greet_resp).await.unwrap();
+    assert_eq!(greet_resp, [0x05, 0x00]);
+
+    // VER=5 CMD=3(UDP ASSOCIATE) RSV=0 ATYP=1(IPv4) DST.ADDR=0.0.0.0 DST.PORT=0
+    conn.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+
+    // Read fixed header VER REP RSV ATYP, then ATYP-dependent BND.ADDR + BND.PORT.
+    let mut head = [0u8; 4];
+    conn.read_exact(&mut head).await.unwrap();
+    assert_eq!(head[0], 0x05, "SOCKS reply version");
+    assert_eq!(head[1], 0x00, "UDP ASSOCIATE reply status");
+
+    let bnd_ip: IpAddr = match head[3] {
+        0x01 => {
+            let mut o = [0u8; 4];
+            conn.read_exact(&mut o).await.unwrap();
+            IpAddr::V4(Ipv4Addr::from(o))
+        }
+        0x04 => {
+            let mut o = [0u8; 16];
+            conn.read_exact(&mut o).await.unwrap();
+            IpAddr::V6(std::net::Ipv6Addr::from(o))
+        }
+        other => panic!("unexpected ATYP {other} in UDP ASSOCIATE reply"),
+    };
+    let mut port = [0u8; 2];
+    conn.read_exact(&mut port).await.unwrap();
+    let bnd_port = u16::from_be_bytes(port);
+
+    // Some SOCKS servers reply with an unspecified BND.ADDR, expecting the
+    // client to use the same host it connected to (RFC 1928 hint). Rusnel
+    // returns the actual bound IP, but normalize defensively.
+    let bnd_ip = if bnd_ip.is_unspecified() {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        bnd_ip
+    };
+
+    (conn, SocketAddr::new(bnd_ip, bnd_port))
+}
+
+/// Build a SOCKS5 UDP datagram targeting the given IPv4 address with the
+/// supplied payload.
+pub fn socks5_udp_wrap_ipv4(target: SocketAddrV4, payload: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0u8, 0u8, 0u8, 0x01];
+    buf.extend_from_slice(&target.ip().octets());
+    buf.extend_from_slice(&target.port().to_be_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
+/// Decode a SOCKS5-wrapped UDP datagram, asserting it points at an IPv4
+/// target, and return `(target_ip, target_port, payload)`.
+pub fn socks5_udp_unwrap_ipv4(buf: &[u8]) -> ([u8; 4], u16, &[u8]) {
+    assert!(buf.len() >= 10);
+    assert_eq!(&buf[..3], &[0, 0, 0], "RSV/FRAG must be zero");
+    assert_eq!(buf[3], 0x01, "expected IPv4 ATYP");
+    let ip = [buf[4], buf[5], buf[6], buf[7]];
+    let port = u16::from_be_bytes([buf[8], buf[9]]);
+    (ip, port, &buf[10..])
 }
 
 /// Perform a SOCKS5 no-auth handshake and CONNECT to a domain target.

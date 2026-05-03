@@ -262,8 +262,9 @@ async fn test_socks5_unsupported_command() {
     .expect("test_socks5_unsupported_command timed out");
 }
 
-/// SOCKS5 IPv6 address type (0x04) is not implemented and must elicit a
-/// reply with status 0x08 ("address type not supported").
+/// SOCKS5 ATYPs we don't recognize (anything other than 0x01/0x03/0x04) must
+/// elicit a reply with status 0x08 ("address type not supported"). 0x04 used
+/// to land here too — it is now fully supported (see the IPv6 tests).
 #[tokio::test]
 async fn test_socks5_unsupported_address_type() {
     timeout(TEST_TIMEOUT, async {
@@ -282,10 +283,9 @@ async fn test_socks5_unsupported_address_type() {
         conn.read_exact(&mut greet).await.unwrap();
         assert_eq!(greet, [0x05, 0x00]);
 
-        // CONNECT to ::1 port 80, IPv6 address type.
-        let mut req = vec![0x05, 0x01, 0x00, 0x04];
-        req.extend_from_slice(&[0u8; 16]);
-        req[19] = 1; // ::1
+        // CONNECT with an unknown ATYP=0x05 (not defined in RFC 1928).
+        let mut req = vec![0x05, 0x01, 0x00, 0x05];
+        req.extend_from_slice(&[0u8; 4]);
         req.extend_from_slice(&80u16.to_be_bytes());
         conn.write_all(&req).await.unwrap();
 

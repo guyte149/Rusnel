@@ -25,7 +25,7 @@ pub enum Direction {
 /// A `host:port` pair as the user typed it on the CLI, before any DNS
 /// resolution. We keep the host as a `String` (not an `IpAddr`) so DNS names
 /// like `google.com` survive intact down to the actual `connect` call.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HostPort {
     pub host: String,
     pub port: u16,
@@ -136,6 +136,20 @@ impl RemoteRequest {
         Self {
             direction: self.direction,
             kind: RemoteKind::Tcp {
+                local: self.kind.local(),
+                remote: target,
+            },
+        }
+    }
+
+    /// UDP variant of [`Self::dynamic_tcp`]: build a UDP forward remote that
+    /// reuses this remote's `local` and `direction`. Used by SOCKS5
+    /// `UDP ASSOCIATE` to manufacture a per-target dynamic remote whose
+    /// target is whatever the SOCKS UDP datagram header pointed at.
+    pub fn dynamic_udp(&self, target: HostPort) -> Self {
+        Self {
+            direction: self.direction,
+            kind: RemoteKind::Udp {
                 local: self.kind.local(),
                 remote: target,
             },

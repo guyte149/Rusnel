@@ -13,8 +13,8 @@ Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC proto
 -   Encrypted connections using the QUIC protocol (TLS 1.3).
 -   Static forward tunneling (TCP, UDP)
 -   Static reverse tunneling (TCP, UDP)
--   Dynamic tunneling (socks5)
--   Dynamic reverse tunneling (reverse socks5)
+-   Dynamic tunneling (socks5, including UDP ASSOCIATE)
+-   Dynamic reverse tunneling (reverse socks5, including UDP ASSOCIATE)
 -   Layered peer authentication: insecure, fingerprint pinning, or full mTLS
     (see [Authentication](#authentication)).
 
@@ -226,16 +226,16 @@ the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 - [ ] `RUST_LOG`-style env filter for `tracing-subscriber` (per-module log levels)
 
 ### Protocol features
-- [ ] support UDP over SOCKS5 (UDP ASSOCIATE — currently only CONNECT/TCP is implemented)
+- [x] support UDP over SOCKS5 (UDP ASSOCIATE) — both forward (`socks`) and reverse (`R:socks`)
 - [ ] add fake-backend http/3 feature to server (real HTTP/3 facade for active probes that open streams)
 - [ ] skip the 1-RTT control handshake on static forwards (cache the parsed `RemoteRequest` server-side; saves ~1 RTT per accepted TCP connection on WAN)
 - [ ] enable QUIC 0-RTT connection resumption (session-ticket cache; cuts the first request after `rusnel client` startup from ~3 RTT to ~1 RTT)
 
 ### Data plane performance
-- [ ] single-copy QUIC→TCP data path: replace `tokio::io::copy_buf` with `quinn::RecvStream::read_chunk` to hand quinn's decrypt buffer to the TCP socket without an intermediate copy (~+10–25% throughput, less CPU)
-- [ ] UDP over QUIC datagrams (RFC 9221) instead of length-prefixed reliable streams: removes per-datagram `Vec` alloc, the per-source `Mutex<HashMap>` lookup, the stream open, and the length frame
-- [ ] swap the UDP session map for a lock-free structure (`dashmap` / `papaya`) so the receive loop doesn't serialize on a global mutex under high pps from many sources
-- [ ] apply the same 256 KB `BufReader`/`copy_buf` treatment to the SOCKS5 server-side TCP leg (currently only the static forward path benefits)
+- [x] swap the UDP session map for a sharded lock-free structure (`dashmap`) so the receive loop doesn't serialize on a global mutex under high pps from many sources
+- [x] 256 KB `BufReader`/`copy_buf` is applied to every tunneled TCP leg, including SOCKS5 CONNECT — all three paths share `tunnel_tcp_stream`
+- [ ] single-copy QUIC→TCP data path via `quinn::RecvStream::read_chunk` (tried in 0.5.0; per-chunk syscall overhead regressed loopback throughput ~40 % vs `BufReader`+`copy_buf` because chunks are small — revisit when quinn exposes a vectored `Bytes`-returning read API)
+- [ ] UDP over QUIC datagrams (RFC 9221) instead of length-prefixed reliable streams: removes per-datagram `Vec` alloc, the per-source map lookup, the stream open, and the length frame
 
 ### Testing & CI
 - [ ] integration test that asserts `--congestion bbr` actually engages BBR (would catch a future quinn API change)
