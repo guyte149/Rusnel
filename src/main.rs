@@ -2,6 +2,7 @@ use clap::crate_version;
 use clap::error::ErrorKind;
 use clap::{Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum};
 use rusnel::cert;
+use rusnel::common::proxy::ProxyConfig;
 use rusnel::common::quic::Congestion;
 use rusnel::common::remote::RemoteRequest;
 use rusnel::common::tls::{parse_fingerprint, ClientTlsConfig, ServerTlsConfig};
@@ -152,6 +153,10 @@ fn parse_remote(s: &str) -> Result<RemoteRequest, String> {
     RemoteRequest::from_str(s).map_err(|e| format!("invalid remote `{s}`: {e}"))
 }
 
+fn parse_proxy(s: &str) -> Result<ProxyConfig, String> {
+    ProxyConfig::from_str(s)
+}
+
 /// Rusnel is a fast tcp/udp multiplexed tunnel.
 #[derive(Parser)]
 #[command(name = "Rusnel", version = crate_version!())]
@@ -182,6 +187,15 @@ enum Mode {
         /// Allow clients to specify reverse port forwarding remotes.
         #[arg(long, default_value_t = false)]
         allow_reverse: bool,
+
+        /// Allow clients to request a reverse SOCKS5 dynamic tunnel
+        /// (`R:socks`). When unset (the default), the server rejects
+        /// reverse-SOCKS requests at the control-plane handshake instead
+        /// of binding a local SOCKS listener that exposes the server's
+        /// network to the connecting client. Forward SOCKS (`socks`) is
+        /// driven entirely by the client and is not gated by this flag.
+        #[arg(long, default_value_t = false)]
+        allow_socks: bool,
 
         /// Disable all TLS authentication. Uses an ephemeral self-signed
         /// certificate and accepts any client. MITM-vulnerable; for testing
@@ -350,6 +364,16 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         /// value (default 300s, matching chisel).
         #[arg(long, value_name = "SECONDS", default_value = "300", value_parser = parse_duration_secs)]
         max_retry_interval: Duration,
+
+        /// Route the QUIC connection through an outbound proxy. Today only
+        /// SOCKS5 with UDP ASSOCIATE (RFC 1928 §4) is supported — QUIC is
+        /// UDP-based, so HTTP CONNECT cannot carry it. Accepts
+        /// `socks5://[user:pass@]host:port` (`socks://` is an alias). The
+        /// proxy must permit UDP ASSOCIATE; many corporate / hotel HTTP
+        /// proxies do not. A fresh UDP association is opened on every
+        /// (re)connect.
+        #[arg(long, value_name = "URL", value_parser = parse_proxy)]
+        proxy: Option<ProxyConfig>,
 
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
@@ -594,6 +618,7 @@ fn main() {
             host,
             port,
             allow_reverse,
+            allow_socks,
             insecure,
             tls_self_signed,
             tls_state_dir,
@@ -634,6 +659,7 @@ fn main() {
                 host,
                 port,
                 allow_reverse,
+                allow_socks,
                 tls,
                 congestion: congestion.into(),
                 max_connections: if max_connections == 0 {
@@ -657,6 +683,7 @@ fn main() {
             congestion,
             max_retry_count,
             max_retry_interval,
+            proxy,
             is_verbose,
             is_debug,
         } => {
@@ -700,6 +727,7 @@ fn main() {
                 tls,
                 congestion: congestion.into(),
                 reconnect,
+                proxy,
             };
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);

@@ -81,7 +81,7 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
                     None
                 };
 
-                let fut = handle_client_connection(conn, config.allow_reverse);
+                let fut = handle_client_connection(conn, config.allow_reverse, config.allow_socks);
                 tokio::spawn(
                     async move {
                         info!("client connected");
@@ -110,7 +110,11 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
 /// local port: without the abort, those tasks would keep accepting forever
 /// against a dead QUIC connection, holding the port until the server
 /// process exited.
-async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) -> Result<String> {
+async fn handle_client_connection(
+    conn: quinn::Incoming,
+    allow_reverse: bool,
+    allow_socks: bool,
+) -> Result<String> {
     let connection = conn.await?;
     let mut tunnels: JoinSet<()> = JoinSet::new();
 
@@ -163,7 +167,7 @@ async fn handle_client_connection(conn: quinn::Incoming, allow_reverse: bool) ->
             Ok(s) => s,
         };
 
-        let fut = handle_remote_stream(quic_connection, stream, allow_reverse);
+        let fut = handle_remote_stream(quic_connection, stream, allow_reverse, allow_socks);
         tunnels.spawn(async move {
             if let Err(e) = fut.await {
                 error!("failed: {}", e);
@@ -186,8 +190,10 @@ async fn handle_remote_stream(
     quic_connection: Connection,
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     allow_reverse: bool,
+    allow_socks: bool,
 ) -> Result<()> {
-    let request = server_receive_remote_request(&mut send, &mut recv, allow_reverse).await?;
+    let request =
+        server_receive_remote_request(&mut send, &mut recv, allow_reverse, allow_socks).await?;
     let remote_display = request.to_string();
 
     async {

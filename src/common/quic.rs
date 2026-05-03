@@ -12,6 +12,7 @@ use std::path::Path;
 use std::{sync::Arc, time::Duration};
 use tracing::{debug, info, warn};
 
+use crate::common::proxy::{create_socks5_proxied_socket, ProxyConfig};
 use crate::common::tls::{cert_sha256, format_fingerprint, ClientTlsConfig, ServerTlsConfig};
 
 // Use the HTTP/3 ALPN identifier so handshake fingerprints look like a real
@@ -113,6 +114,34 @@ pub fn create_client_endpoint(
         SocketAddr::V6(_) => "[::]:0".parse()?,
     };
     let mut endpoint = Endpoint::client(bind_addr)?;
+    endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
+
+/// Like [`create_client_endpoint`], but routes every QUIC datagram through a
+/// SOCKS5 proxy via UDP ASSOCIATE. Async because the SOCKS5 control-plane
+/// handshake is performed up-front; the returned endpoint is single-use
+/// (one QUIC connection per association — disconnect tears the proxy
+/// relay down, requiring a fresh handshake on reconnect).
+pub async fn create_client_endpoint_via_proxy(
+    tls: &ClientTlsConfig,
+    congestion: Congestion,
+    server_addr: SocketAddr,
+    proxy: &ProxyConfig,
+) -> Result<Endpoint> {
+    use quinn::{EndpointConfig, TokioRuntime};
+    use std::sync::Arc;
+
+    let mut client_config = build_quic_client_config(tls)?;
+    client_config.transport_config(build_transport_config(congestion));
+
+    let socket = create_socks5_proxied_socket(proxy, server_addr).await?;
+    let mut endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        socket,
+        Arc::new(TokioRuntime),
+    )?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }

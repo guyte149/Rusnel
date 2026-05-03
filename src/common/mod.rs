@@ -1,3 +1,4 @@
+pub mod proxy;
 pub mod quic;
 pub mod remote;
 pub mod socks;

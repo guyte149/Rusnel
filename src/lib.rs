@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+use common::proxy::ProxyConfig;
 use common::quic::Congestion;
 use common::remote::RemoteRequest;
 use common::tls::{ClientTlsConfig, ServerTlsConfig};
@@ -19,6 +20,14 @@ pub struct ServerConfig {
     pub host: IpAddr,
     pub port: u16,
     pub allow_reverse: bool,
+    /// Whether to allow clients to request a reverse SOCKS5 dynamic tunnel
+    /// (`R:socks`). When `false` (the default), reverse-SOCKS requests are
+    /// rejected at the control-plane handshake so the server never spins up
+    /// a SOCKS listener on behalf of a client. Forward SOCKS (`socks`)
+    /// decomposes into per-target dynamic TCP/UDP on the wire and is *not*
+    /// gated by this flag — see the README's "Security & access control"
+    /// roadmap for the planned full-ACL story.
+    pub allow_socks: bool,
     pub tls: ServerTlsConfig,
     pub congestion: Congestion,
     /// Maximum number of concurrent client *connections* the server will
@@ -98,6 +107,11 @@ pub struct ClientConfig {
     pub tls: ClientTlsConfig,
     pub congestion: Congestion,
     pub reconnect: ReconnectConfig,
+    /// Optional outbound proxy for the QUIC connection. Today only
+    /// `socks5://[user:pass@]host:port` is supported (carries QUIC over
+    /// SOCKS5 UDP ASSOCIATE per RFC 1928 §4). `None` means connect
+    /// directly.
+    pub proxy: Option<ProxyConfig>,
 }
 
 /// Controls the client's reconnect-on-disconnect behaviour.

@@ -98,6 +98,7 @@ pub fn server_config_with_tls(
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port,
         allow_reverse,
+        allow_socks: true,
         tls,
         congestion: Default::default(),
         max_connections: None,
@@ -123,6 +124,7 @@ pub fn client_config_with_tls(
         tls,
         congestion: Default::default(),
         reconnect: ReconnectConfig::default(),
+        proxy: None,
     }
 }
 
