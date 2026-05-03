@@ -123,22 +123,32 @@ impl Default for ReconnectConfig {
     }
 }
 
+/// Build a multi-thread tokio runtime and run the server to completion.
+///
+/// This is the synchronous convenience entry point used by `main`. Embedders
+/// inside an existing async context should call [`server::run_async`]
+/// directly so they don't end up nesting runtimes (which would either panic
+/// in debug builds or silently deadlock in release).
 pub fn run_server(config: ServerConfig) {
     info!("running server");
-    match server::run(config) {
-        Ok(_) => {}
-        Err(e) => {
-            error!("an error occurred: {}", e)
-        }
+    let result = build_runtime().and_then(|rt| rt.block_on(server::run_async(config)));
+    if let Err(e) = result {
+        error!("an error occurred: {}", e);
     }
 }
 
+/// Build a multi-thread tokio runtime and run the client to completion.
+///
+/// See [`run_server`] for the rationale on why embedders should prefer
+/// [`client::run_async`].
 pub fn run_client(config: ClientConfig) {
     info!("running client");
-    match client::run(config) {
-        Ok(_) => {}
-        Err(e) => {
-            error!("an error occured: {}", e)
-        }
+    let result = build_runtime().and_then(|rt| rt.block_on(client::run_async(config)));
+    if let Err(e) = result {
+        error!("an error occurred: {}", e);
     }
+}
+
+fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Runtime::new().map_err(Into::into)
 }

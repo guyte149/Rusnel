@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::common::quic::create_server_endpoint;
-use crate::common::remote::{Protocol, RemoteRequest};
+use crate::common::remote::Protocol;
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::server_receive_remote_request;
@@ -19,10 +19,6 @@ use crate::ServerConfig;
 /// values purely so the wire dumps from the two tools look similar; the QUIC
 /// layer treats the numeric value as opaque.
 const CLOSE_CODE_SERVER_SHUTDOWN: u32 = 0;
-
-pub fn run(config: ServerConfig) -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(run_async(config))
-}
 
 pub async fn run_async(config: ServerConfig) -> Result<()> {
     let endpoint =
@@ -163,66 +159,20 @@ async fn handle_remote_stream(
     async {
         info!("tunnel established");
 
-        match request {
-            // reverse socks
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: ref remote_host_ref,
-                remote_port: 0,
-                reversed: true,
-                protocol: Protocol::Tcp,
-            } if remote_host_ref == "socks" => {
-                tunnel_socks_client(quic_connection, request).await?;
-            }
+        // Reverse SOCKS is the only special case — it ignores the
+        // (remote_host, remote_port) pair on the request because the actual
+        // target is supplied later, per-connection, by the SOCKS handshake.
+        // Everything else dispatches purely on (reversed, protocol).
+        if request.is_socks() && request.reversed {
+            tunnel_socks_client(quic_connection, request).await?;
+            return Ok(());
+        }
 
-            // simple forward TCP
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: _,
-                remote_port: _,
-                reversed: false,
-                protocol: Protocol::Tcp,
-            } => {
-                tunnel_tcp_server(recv, send, request).await?;
-            }
-
-            // simple reverse TCP
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: _,
-                remote_port: _,
-                reversed: true,
-                protocol: Protocol::Tcp,
-            } => {
-                tunnel_tcp_client(quic_connection, request).await?;
-            }
-
-            // simple forward UDP
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: _,
-                remote_port: _,
-                reversed: false,
-                protocol: Protocol::Udp,
-            } => {
-                tunnel_udp_server(recv, send, request).await?;
-            }
-
-            // simple reverse UDP
-            RemoteRequest {
-                local_host: _,
-                local_port: _,
-                remote_host: _,
-                remote_port: _,
-                reversed: true,
-                protocol: Protocol::Udp,
-            } => {
-                tunnel_udp_client(quic_connection, request).await?;
-            }
+        match (request.reversed, request.protocol) {
+            (false, Protocol::Tcp) => tunnel_tcp_server(recv, send, request).await?,
+            (true, Protocol::Tcp) => tunnel_tcp_client(quic_connection, request).await?,
+            (false, Protocol::Udp) => tunnel_udp_server(recv, send, request).await?,
+            (true, Protocol::Udp) => tunnel_udp_client(quic_connection, request).await?,
         }
 
         Ok(())

@@ -14,9 +14,9 @@ use super::tunnel::client_send_remote_request;
 use anyhow::{anyhow, Result};
 
 pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
-    let local_addr = format!("{}:{}", remote.local_host, remote.local_port);
-    let listener = TcpListener::bind(&local_addr).await?;
-    info!("SOCKS5 listening on {}", &local_addr);
+    let local_addr = remote.local_socket_addr();
+    let listener = TcpListener::bind(local_addr).await?;
+    info!("SOCKS5 listening on {}", local_addr);
 
     let conn_counter = AtomicUsize::new(0);
 
@@ -109,14 +109,14 @@ async fn socks_handshake(
             conn.read_exact(&mut port).await?;
             let port = u16::from_be_bytes(port);
             let remote_address = Ipv4Addr::from(addr).to_string();
-            RemoteRequest::new(
-                original_remote.local_host,
-                original_remote.local_port,
-                remote_address,
-                port,
-                original_remote.reversed,
-                remote::Protocol::Tcp,
-            )
+            RemoteRequest {
+                local_host: original_remote.local_host,
+                local_port: original_remote.local_port,
+                remote_host: remote_address,
+                remote_port: port,
+                reversed: original_remote.reversed,
+                protocol: remote::Protocol::Tcp,
+            }
         }
         0x03 => {
             // Domain name
@@ -128,14 +128,14 @@ async fn socks_handshake(
             conn.read_exact(&mut port).await?;
             let port = u16::from_be_bytes(port);
             let domain = String::from_utf8_lossy(&domain).into_owned();
-            RemoteRequest::new(
-                original_remote.local_host,
-                original_remote.local_port,
-                domain,
-                port,
-                original_remote.reversed,
-                remote::Protocol::Tcp,
-            )
+            RemoteRequest {
+                local_host: original_remote.local_host,
+                local_port: original_remote.local_port,
+                remote_host: domain,
+                remote_port: port,
+                reversed: original_remote.reversed,
+                protocol: remote::Protocol::Tcp,
+            }
         }
         _ => {
             conn.write_all(&[0x05, 0x08]).await?;

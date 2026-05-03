@@ -114,6 +114,13 @@ Arguments:
                        R:socks
                        R:5000:socks
                        1.1.1.1:53/udp
+                       [::1]:80
+                       [::1]:5000:[2001:db8::1]:80
+                       R:[::1]:2222:[::1]:22
+
+                   IPv6 literals must be wrapped in [brackets] so the parser
+                   can disambiguate them from the colon-separated address
+                   format (same convention as URLs and ssh -L).
 
                    When the Rusnel server has --allow-reverse enabled, remotes can be prefixed with R to denote that they are reversed.
 
@@ -149,27 +156,6 @@ servers reachable via a v6-preferring resolver still connect within
 ~250 ms. Server-side resources (including reverse-tunnel listeners) are
 released the moment the QUIC connection drops.
 
-## Performance
-
-Rusnel (QUIC) vs [Chisel](https://github.com/jpillora/chisel) (SSH-over-WebSocket)
-on loopback. Throughput is iperf3 over a tunneled TCP forward
-(100 MB × 5 runs + warmup, median); latency is the round-trip time of a
-64 B echo across the tunnel.
-
-![Throughput](benchmark/iperf/results/loopback/throughput.png)
-![Latency](benchmark/iperf/results/loopback/latency.png)
-
-End-to-end HTTP request times through the tunnel across payload sizes
-(median of 5 runs, error bars show min/max):
-
-![HTTP through tunnel](benchmark/chisel-bench/results/loopback/chisel-bench.png)
-
-The benchmark harness also includes a `wan` profile that applies
-`tc qdisc netem delay 25ms` to the loopback interface to approximate a
-50 ms-RTT WAN. Reproduce everything with `./benchmark/run.sh`
-(requires Docker; needs `--cap-add=NET_ADMIN` for netem profiles, which
-the script adds for you). See [`benchmark/`](benchmark/) for tunables.
-
 ## Authentication
 
 Both the server and the client require an explicit TLS-mode flag — there is
@@ -204,6 +190,27 @@ rusnel client --tls-ca   ./pki/ca.pem --tls-cert ./pki/client.pem --tls-key ./pk
 credentials baked in at compile time are also supported via
 `RUSNEL_EMBED_*` env vars — see `build.rs` and the
 [CHANGELOG](CHANGELOG.md) for details.
+
+## Performance
+
+Rusnel (QUIC) vs [Chisel](https://github.com/jpillora/chisel) (SSH-over-WebSocket)
+on loopback. Throughput is iperf3 over a tunneled TCP forward
+(100 MB × 5 runs + warmup, median); latency is the round-trip time of a
+64 B echo across the tunnel.
+
+![Throughput](benchmark/iperf/results/loopback/throughput.png)
+![Latency](benchmark/iperf/results/loopback/latency.png)
+
+End-to-end HTTP request times through the tunnel across payload sizes
+(median of 5 runs, error bars show min/max):
+
+![HTTP through tunnel](benchmark/chisel-bench/results/loopback/chisel-bench.png)
+
+The benchmark harness also includes a `wan` profile that applies
+`tc qdisc netem delay 25ms` to the loopback interface to approximate a
+50 ms-RTT WAN. Reproduce everything with `./benchmark/run.sh`
+(requires Docker; needs `--cap-add=NET_ADMIN` for netem profiles, which
+the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 
 ## TODO
 - [x] write tests in rust for tcp, udp, reverse and socks
