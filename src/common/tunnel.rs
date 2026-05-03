@@ -79,12 +79,13 @@ pub async fn server_receive_remote_request(
         return Err(anyhow!("Reverse remotes are not allowed"));
     }
 
-    // Reverse-SOCKS5 is the only path that surfaces here as a SOCKS-typed
-    // request — forward `socks` is decomposed client-side into per-target
-    // dynamic TCP/UDP requests, which look like normal forward tunnels on
-    // the wire and so can't be gated here. The check is therefore purely
-    // about preventing a connecting client from making the *server* spin
-    // up a SOCKS listener exposing the server's network.
+    // Gates *all* SOCKS5 traffic — both reverse-SOCKS listener requests
+    // (`RemoteKind::Socks5`, used for `R:socks`) and forward-SOCKS dynamic
+    // per-target streams (`RemoteKind::Tcp` / `Udp` with `from_socks=true`,
+    // manufactured by the client's SOCKS5 handler on every CONNECT or
+    // UDP ASSOCIATE target). The combination means `R:socks` requires
+    // BOTH `--allow-reverse` (checked above) and `--allow-socks`, while
+    // forward `socks` requires just `--allow-socks`.
     if request.is_socks() && !allow_socks {
         let response = RemoteResponse::RemoteFailed(String::from("SOCKS5 remotes are not allowed"));
         write_framed(send_channel, &response).await?;

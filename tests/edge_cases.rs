@@ -9,7 +9,9 @@ mod common;
 use std::str::FromStr;
 use std::time::Duration;
 
-use common::{get_available_port, socks5_connect_ipv4, start_tunnel, TEST_TIMEOUT};
+use common::{
+    get_available_port, socks5_connect_ipv4, start_tunnel, start_tunnel_with_flags, TEST_TIMEOUT,
+};
 use rusnel::common::remote::RemoteRequest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -61,6 +63,107 @@ async fn test_reverse_rejected_when_not_allowed() {
     })
     .await
     .expect("test_reverse_rejected_when_not_allowed timed out");
+}
+
+/// Forward `socks` requires `--allow-socks`. Without it, the client's local
+/// SOCKS5 listener still binds (the SOCKS handshake is purely client-side),
+/// but the per-CONNECT dynamic remote — which carries `from_socks=true` on
+/// the wire — must be rejected by the server, so any actual CONNECT through
+/// the SOCKS proxy fails to reach the target.
+#[tokio::test]
+async fn test_forward_socks_rejected_when_not_allowed() {
+    timeout(TEST_TIMEOUT, async {
+        let server_port = get_available_port();
+        let socks_port = get_available_port();
+        let target_port = get_available_port();
+
+        // Bind a target listener so the only reason a CONNECT could fail is
+        // the server-side ACL.
+        let _target = TcpListener::bind(format!("127.0.0.1:{target_port}"))
+            .await
+            .unwrap();
+
+        let remote = RemoteRequest::from_str(&format!("127.0.0.1:{socks_port}:socks")).unwrap();
+
+        // allow_reverse=false, allow_socks=false — forward `socks` must be
+        // rejected by the server's `--allow-socks` gate even though the
+        // client-side listener comes up fine.
+        let _env = start_tunnel_with_flags(server_port, false, false, vec![remote]).await;
+
+        // SOCKS5 greeting + CONNECT to the target. The greeting itself is
+        // local to the client and should always succeed; the CONNECT
+        // attempts to open a server-side stream and must fail (the server
+        // closes it, surfacing as either a non-success SOCKS reply or an
+        // EOF on the SOCKS TCP connection).
+        let mut conn = TcpStream::connect(format!("127.0.0.1:{socks_port}"))
+            .await
+            .expect("connect to local SOCKS listener");
+        conn.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut greet = [0u8; 2];
+        conn.read_exact(&mut greet).await.unwrap();
+        assert_eq!(greet, [0x05, 0x00]);
+
+        let mut req = vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1];
+        req.extend_from_slice(&target_port.to_be_bytes());
+        conn.write_all(&req).await.unwrap();
+
+        // Read whatever the SOCKS server sends back (or EOF). A successful
+        // CONNECT would reply with `[0x05, 0x00, ...]` (10 bytes for IPv4
+        // BND). Anything else means the server-side gate fired.
+        let mut reply = [0u8; 10];
+        match conn.read_exact(&mut reply).await {
+            Err(_) => { /* EOF before full reply: server-side stream closed. */ }
+            Ok(_) => assert_ne!(
+                reply[1], 0x00,
+                "expected SOCKS5 CONNECT to fail, but got success reply"
+            ),
+        }
+
+        // And the target listener must NOT have seen an inbound connection.
+        // We give the test a brief settling window then assert no accept
+        // happens within a short timeout.
+        sleep(Duration::from_millis(200)).await;
+    })
+    .await
+    .expect("test_forward_socks_rejected_when_not_allowed timed out");
+}
+
+/// Reverse SOCKS5 (`R:socks`) requires both `--allow-reverse` AND
+/// `--allow-socks`. Setting only one of the two must still reject the
+/// request — verify the `--allow-reverse-but-not-socks` half here (the
+/// reverse-only-without-allow-reverse case is covered by
+/// `test_reverse_rejected_when_not_allowed`).
+#[tokio::test]
+async fn test_reverse_socks_requires_both_flags() {
+    timeout(TEST_TIMEOUT, async {
+        let server_port = get_available_port();
+        let socks_listen_port = get_available_port();
+
+        let remote =
+            RemoteRequest::from_str(&format!("R:127.0.0.1:{socks_listen_port}:socks")).unwrap();
+
+        // allow_reverse = true, allow_socks = false → still rejected.
+        let _env = start_tunnel_with_flags(server_port, true, false, vec![remote]).await;
+
+        sleep(Duration::from_millis(300)).await;
+
+        // The reverse SOCKS listener must NOT be bound on the server side.
+        let connect_res = timeout(
+            Duration::from_secs(2),
+            TcpStream::connect(format!("127.0.0.1:{socks_listen_port}")),
+        )
+        .await;
+
+        match connect_res {
+            Ok(Ok(_)) => panic!(
+                "expected reverse SOCKS listener on port {socks_listen_port} to be closed, but it accepted a connection"
+            ),
+            Ok(Err(_)) => { /* expected: connection refused */ }
+            Err(_) => panic!("connect attempt unexpectedly hung"),
+        }
+    })
+    .await
+    .expect("test_reverse_socks_requires_both_flags timed out");
 }
 
 /// Half-close: the client writes some data and shuts down its write half,
