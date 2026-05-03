@@ -20,13 +20,14 @@ pub struct ServerConfig {
     pub host: IpAddr,
     pub port: u16,
     pub allow_reverse: bool,
-    /// Whether to allow clients to request a reverse SOCKS5 dynamic tunnel
-    /// (`R:socks`). When `false` (the default), reverse-SOCKS requests are
-    /// rejected at the control-plane handshake so the server never spins up
-    /// a SOCKS listener on behalf of a client. Forward SOCKS (`socks`)
-    /// decomposes into per-target dynamic TCP/UDP on the wire and is *not*
-    /// gated by this flag — see the README's "Security & access control"
-    /// roadmap for the planned full-ACL story.
+    /// Whether to allow clients to use SOCKS5 dynamic tunnels in either
+    /// direction. Forward `socks` requests carry a `from_socks` marker on the
+    /// wire (set by `RemoteRequest::dynamic_tcp` / `dynamic_udp`) so the
+    /// server can gate the per-target dynamic streams a SOCKS5 client
+    /// manufactures, even though their `kind` is plain `Tcp` / `Udp`.
+    /// Reverse `R:socks` listener requests use `RemoteKind::Socks5` directly
+    /// and additionally require `allow_reverse`. `false` (the default) means
+    /// the server rejects all SOCKS5 traffic at the control-plane handshake.
     pub allow_socks: bool,
     pub tls: ServerTlsConfig,
     pub congestion: Congestion,

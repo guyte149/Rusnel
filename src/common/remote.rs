@@ -86,23 +86,43 @@ impl RemoteKind {
     }
 }
 
-/// A single tunnel description. The wire payload is `(direction, kind)` and
-/// dispatchers on either side consume it via `match` with no stringly-typed
-/// sentinels and no `_` placeholders.
+/// A single tunnel description. The wire payload is
+/// `(direction, kind, from_socks)` and dispatchers on either side consume it
+/// via `match` with no stringly-typed sentinels and no `_` placeholders.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRequest {
     pub direction: Direction,
     pub kind: RemoteKind,
+    /// `true` when this remote was manufactured by a SOCKS5 handler as a
+    /// per-target dynamic tunnel (forward `socks` → per-CONNECT TCP target;
+    /// forward `socks` UDP ASSOCIATE → per-target UDP). Lets the server gate
+    /// SOCKS-originated traffic via `--allow-socks` even though, by the time
+    /// the request reaches the wire, its `kind` is a plain `Tcp` / `Udp`
+    /// pointing at whatever target the SOCKS client asked for.
+    ///
+    /// For static remotes (anything declared on the CLI) and for reverse
+    /// SOCKS5 listeners (which use `RemoteKind::Socks5` directly) this field
+    /// stays `false` — `is_socks()` already returns `true` for the latter
+    /// based on `kind`.
+    #[serde(default)]
+    pub from_socks: bool,
 }
 
 impl RemoteRequest {
     pub fn new(direction: Direction, kind: RemoteKind) -> Self {
-        Self { direction, kind }
+        Self {
+            direction,
+            kind,
+            from_socks: false,
+        }
     }
 
-    /// `true` if this remote is a SOCKS5 dynamic tunnel.
+    /// `true` if this remote represents SOCKS5 traffic — either a standalone
+    /// SOCKS5 listener (reverse `R:socks`) or a dynamic per-target stream
+    /// manufactured inside a forward SOCKS5 handler. The server uses this to
+    /// gate everything SOCKS-related behind a single `--allow-socks` flag.
     pub fn is_socks(&self) -> bool {
-        matches!(self.kind, RemoteKind::Socks5 { .. })
+        self.from_socks || matches!(self.kind, RemoteKind::Socks5 { .. })
     }
 
     pub fn is_reversed(&self) -> bool {
@@ -139,6 +159,10 @@ impl RemoteRequest {
                 local: self.kind.local(),
                 remote: target,
             },
+            // Tag this as SOCKS-originated so the server's `--allow-socks`
+            // gate fires even though the wire-level `kind` looks like a
+            // plain TCP forward.
+            from_socks: true,
         }
     }
 
@@ -153,6 +177,7 @@ impl RemoteRequest {
                 local: self.kind.local(),
                 remote: target,
             },
+            from_socks: true,
         }
     }
 }
@@ -225,7 +250,11 @@ impl FromStr for RemoteRequest {
         let (protocol_hint, body) = parse_protocol(after_dir)?;
         let tokens = split_addr_tokens(body)?;
         let kind = tokens_to_kind(&tokens, protocol_hint)?;
-        Ok(RemoteRequest { direction, kind })
+        Ok(RemoteRequest {
+            direction,
+            kind,
+            from_socks: false,
+        })
     }
 }
 

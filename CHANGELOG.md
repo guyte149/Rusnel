@@ -11,15 +11,22 @@ Two new server/client features from the README roadmap:
 
 ### Added
 
-- **`--allow-socks` server flag**. Default-deny gate for reverse-SOCKS5
-  remotes (`R:socks` / `R:port:socks`). Without the flag the server now
-  rejects reverse-SOCKS requests at the control-plane handshake instead
-  of silently spinning up a local SOCKS listener that exposes the
-  server's network to the connecting client. Mirrors the existing
-  `--allow-reverse` semantics. Forward SOCKS (`socks`) decomposes into
-  per-target dynamic TCP/UDP requests on the wire and is *not* gated by
-  this flag — see the README's "Security & access control" roadmap for
-  the planned full ACL story (per-cert allow/deny patterns).
+- **`--allow-socks` server flag**. Default-deny gate for *all* SOCKS5
+  traffic — both forward (`socks`, where the client runs the SOCKS5
+  listener locally and the server connects out per CONNECT / UDP
+  ASSOCIATE target) and reverse (`R:socks`, where the server runs the
+  SOCKS5 listener exposing the server's network to the client). Without
+  the flag the server rejects SOCKS5 requests at the control-plane
+  handshake. Reverse SOCKS5 additionally requires `--allow-reverse`, so
+  `R:socks` needs both flags.
+  - Forward SOCKS5 gating works via a new wire-level `from_socks: bool`
+    field on `RemoteRequest` (see Changed below) — the client's SOCKS5
+    handler now stamps `from_socks=true` on every per-target dynamic
+    `Tcp`/`Udp` remote it manufactures, so the server can gate them
+    even though their `kind` looks like a plain forward.
+  - **Behaviour change for forward SOCKS users**: existing deployments
+    that relied on `socks` working without an explicit flag must add
+    `--allow-socks` to the server invocation when upgrading.
 - **`--proxy` client flag** for routing the QUIC connection through a
   SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4). Accepts
   `socks5://[user:pass@]host:port` (`socks://` is an alias). HTTP
@@ -47,15 +54,34 @@ Two new server/client features from the README roadmap:
     through it, completes the QUIC handshake, and round-trips bytes
     over a tunneled TCP echo.
 
+### Changed
+
+- **Wire-level `RemoteRequest` gains a `from_socks: bool` field.** Set
+  by `RemoteRequest::dynamic_tcp` / `dynamic_udp` so the per-target
+  dynamic remotes a SOCKS5 client manufactures carry their SOCKS
+  context to the server, enabling the new `--allow-socks` gate to fire
+  on forward `socks` (the dynamic remotes' `kind` is plain `Tcp`/`Udp`,
+  so without this marker the server can't tell them apart from regular
+  forwards). `RemoteRequest::is_socks()` now returns `true` for either
+  `kind == Socks5` or `from_socks == true`. **This is a breaking wire
+  change — clients and servers must upgrade together** (same protocol
+  bump precedent as 0.4.0). External CLI behaviour is unchanged for
+  static remotes; the new field is `false` for everything except
+  SOCKS-manufactured dynamic remotes.
+
 ### Notes for downstream embedders
 
 - `ServerConfig` gains `pub allow_socks: bool`. `false` is safe-by-default
   (matches the `--allow-reverse` precedent); existing embedders relying
-  on reverse-SOCKS need to set `allow_socks: true`.
+  on SOCKS5 in either direction need to set `allow_socks: true`.
 - `ClientConfig` gains `pub proxy: Option<ProxyConfig>`. `None` =
   direct connect (existing behaviour).
+- `RemoteRequest` gains `pub from_socks: bool` (`#[serde(default)]`).
+  Hand-built `RemoteRequest { ... }` literals must add the field; users
+  of `RemoteRequest::new` / `RemoteRequest::from_str` /
+  `dynamic_tcp` / `dynamic_udp` are unaffected.
 - `server_receive_remote_request` gains an `allow_socks: bool` parameter
-  alongside the existing `allow_reverse`. Wire format unchanged.
+  alongside the existing `allow_reverse`.
 
 ## [0.5.0] - 2026-05-03
 
