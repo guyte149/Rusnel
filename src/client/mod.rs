@@ -35,7 +35,7 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
 
     // Single ^C listener for the lifetime of the process. Sessions subscribe to
     // it so a shutdown wins over both an in-progress reconnect sleep and a
-    // running session.
+    // running connection.
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_tx_clone = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -120,8 +120,8 @@ impl<'a> EndpointPool<'a> {
 /// when the first attempt is just a few RTTs slow.
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 
-/// Outer loop: connect, run a session until it dies, then reconnect with
-/// exponential backoff. Returns once shutdown is signalled, the session
+/// Outer loop: connect, run a connection until it dies, then reconnect with
+/// exponential backoff. Returns once shutdown is signalled, the connection
 /// completes cleanly, or `max_retries` is exhausted.
 async fn run_with_reconnect(
     endpoints: Option<&mut EndpointPool<'_>>,
@@ -173,7 +173,7 @@ async fn run_with_reconnect(
                 attempt = 0;
                 backoff = initial_backoff;
 
-                let outcome = run_session(connection, config, shutdown_tx).await;
+                let outcome = run_connection(connection, config, shutdown_tx).await;
                 match outcome {
                     SessionOutcome::Shutdown => return Ok(()),
                     SessionOutcome::Disconnected(reason) => {
@@ -319,9 +319,9 @@ enum SessionOutcome {
     Disconnected(String),
 }
 
-/// Run one connected session: spawn forward / reverse tunnels and wait for
+/// Run one connected client: spawn forward / reverse tunnels and wait for
 /// either the connection to die or shutdown.
-async fn run_session(
+async fn run_connection(
     connection: Connection,
     config: &ClientConfig,
     shutdown_tx: &broadcast::Sender<()>,
@@ -360,7 +360,7 @@ async fn run_session(
     let mut shutdown_rx = shutdown_tx.subscribe();
     let outcome = tokio::select! {
         _ = shutdown_rx.recv() => {
-            info!("Shutting down tunnel session and notifying server...");
+            info!("Shutting down client and notifying server...");
             // Close the QUIC connection with a non-zero application code and
             // a human-readable reason. The server logs this verbatim, so the
             // operator on the other end sees "client closed (code 130, client
@@ -401,9 +401,9 @@ async fn handle_remote_stream(quic_connection: Connection, remote: RemoteRequest
     }
 
     match &remote.kind {
-        RemoteKind::Socks5 { .. } => tunnel_socks_client(quic_connection, remote).await?,
-        RemoteKind::Tcp { .. } => tunnel_tcp_client(quic_connection, remote).await?,
-        RemoteKind::Udp { .. } => tunnel_udp_client(quic_connection, remote).await?,
+        RemoteKind::Socks5 { .. } => tunnel_socks_client(quic_connection, remote, None).await?,
+        RemoteKind::Tcp { .. } => tunnel_tcp_client(quic_connection, remote, None).await?,
+        RemoteKind::Udp { .. } => tunnel_udp_client(quic_connection, remote, None).await?,
     }
     Ok(())
 }
@@ -421,10 +421,10 @@ async fn client_accept_dynamic_reverse_remote(quic_connection: Connection) -> Re
             info!("reverse tunnel established");
             match (dynamic_remote.direction, &dynamic_remote.kind) {
                 (Direction::Reverse, RemoteKind::Tcp { .. }) => {
-                    tunnel_tcp_server(recv, send, dynamic_remote).await?;
+                    tunnel_tcp_server(recv, send, dynamic_remote, None).await?;
                 }
                 (Direction::Reverse, RemoteKind::Udp { .. }) => {
-                    tunnel_udp_server(recv, send, dynamic_remote).await?;
+                    tunnel_udp_server(recv, send, dynamic_remote, None).await?;
                 }
                 (Direction::Reverse, RemoteKind::Socks5 { .. }) => {
                     error!("server pushed a reverse SOCKS5 dynamic remote — should be Tcp/Udp");

@@ -5,6 +5,86 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-03
+
+Phase-1 of the long-tracked **server admin API + CLI** README item: the
+server can now expose a read-only HTTP API over a unix domain socket so
+operators can list active clients, the tunnels each client declared,
+the live conns going through every tunnel, and per-tunnel / per-conn
+byte counters. A new `rusnel ctl` subcommand wraps the API for the
+shell.
+
+Write endpoints (kick client, kill conn), Prometheus `/metrics`, and
+the embedded web UI are explicit phase-2 follow-ups.
+
+### Added
+
+- **Three-layer client / tunnel / conn data model.** A *client* is one
+  connected client daemon (`rusnel client`) talking to this server; a
+  *tunnel* is the remote declaration that client established with the
+  server (deduplicated per client by spec, lives for the client's
+  lifetime); a *conn* is a single proxied network connection going
+  through a tunnel (one accepted local TCP socket, one per-source UDP
+  flow, one SOCKS5 CONNECT, one SOCKS5 UDP target). Tunnels expose
+  cumulative byte counters across every conn that ever ran through
+  them; conns expose live counters for their own bytes plus an
+  optional human-readable `peer` label.
+- **Read-only admin HTTP API enabled by default** at
+  `~/.rusnel/admin.sock` (parent directory auto-created, socket created
+  with mode `0600`). Serves
+  `GET /api/v1/{server,clients,clients/:id,clients/:id/{tunnels,conns},tunnels,tunnels/:id,tunnels/:id/conns,conns,conns/:id,history}`.
+  Filesystem permissions are the only auth: access to the socket
+  implies full read access to live client/tunnel/conn metadata.
+  Override with `--admin-socket <path>` (e.g. when running multiple
+  servers as the same uid); disable entirely with `--no-admin-socket`.
+- **`rusnel ctl` subcommand** — read-only client for the admin API.
+  Subcommands: `server`, `clients`, `client <id>`, `client-conns <id>`,
+  `tunnels`, `tunnel <id>`, `tunnel-conns <id>`, `conns`, `history`.
+  Output defaults to a tab-aligned table; `--json` passes the raw API
+  payload through. Defaults to the same `~/.rusnel/admin.sock` path
+  the server uses, so the zero-flag pairing just works; override with
+  `--socket <path>`.
+- **Per-tunnel byte counters** on the data plane. TCP-style copies
+  account via a new `CountedReader` wrapper around the existing
+  `BufReader` chain in `src/common/tcp.rs`; datagram paths
+  (`src/common/udp.rs`, `src/common/socks.rs`) bump the counters
+  directly with each datagram length. The `bytes_in` field counts data
+  received from the QUIC peer; `bytes_out` counts data sent to it. Both
+  use `Ordering::Relaxed` — the admin API is observability, not a sync
+  primitive.
+- **Bounded connection-history ring buffer** (256 entries, oldest
+  evicted). Each `HistoryEntry` carries the disconnect reason already
+  shown in the existing `client disconnected: ...` info log, so
+  operators can correlate.
+- **`tests/admin.rs`** end-to-end test: brings up server + client on
+  localhost, asserts socket mode is `0600`, exercises every read
+  endpoint, pushes bytes through a forward TCP tunnel, and confirms
+  per-tunnel `bytes_in` / `bytes_out` advance.
+- **`src/common/counted.rs`** — `TunnelCounters` (two `Arc<AtomicU64>`s
+  shareable between the admin API and the data plane) and
+  `CountedReader<R: AsyncRead>`. Unit-tested in-module.
+
+### Changed
+
+- **`ServerConfig` gains an `admin_socket: Option<PathBuf>` field.**
+  Library embedders must add it; existing CLI users only see the new
+  flag.
+- **Tunnel handler signatures take a new `Counters = Option<Arc<TunnelCounters>>`
+  argument.** The server passes `Some` for tunnels it has registered;
+  the client side always passes `None`. Affects
+  `tunnel_tcp_stream`, `tunnel_tcp_client`, `tunnel_tcp_server`,
+  `tunnel_udp_stream`, `tunnel_udp_client`, `tunnel_udp_server`, and
+  `tunnel_socks_client`.
+
+### Dependencies
+
+- Added: `axum 0.7` (json, tokio, http1, matched-path, query;
+  `default-features = false`), `hyper 1` (client + server, http1),
+  `hyper-util 0.1` (tokio + service), `http-body-util 0.1`, `tower 0.5`
+  (util only), `serde_json 1`. Total transitive footprint is small —
+  the existing `quinn` + `tokio` + `rustls` graph already pulls in most
+  of the supporting crates.
+
 ## [0.6.1] - 2026-05-03
 
 Follow-up to 0.6.0: extend the new `--allow-socks` server gate to cover

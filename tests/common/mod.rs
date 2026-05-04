@@ -102,6 +102,7 @@ pub fn server_config_with_tls(
         tls,
         congestion: Default::default(),
         max_connections: None,
+        admin_socket: None,
     }
 }
 

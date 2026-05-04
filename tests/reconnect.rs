@@ -126,7 +126,7 @@ async fn handle_test_stream(
             return;
         }
     };
-    if let Err(e) = tunnel_tcp_server(recv, send, request).await {
+    if let Err(e) = tunnel_tcp_server(recv, send, request, None).await {
         info!("tunnel ended: {e}");
     }
 }

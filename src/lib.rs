@@ -6,12 +6,14 @@ use common::remote::RemoteRequest;
 use common::tls::{ClientTlsConfig, ServerTlsConfig};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info};
 
 pub mod cert;
 pub mod client;
 pub mod common;
+pub mod ctl;
 pub mod embedded;
 pub mod server;
 
@@ -37,6 +39,13 @@ pub struct ServerConfig {
     /// unlimited connections and exhaust file descriptors / memory. `None`
     /// means uncapped (the default; matches chisel's behaviour).
     pub max_connections: Option<usize>,
+    /// Path to a unix domain socket to expose the read-only admin HTTP
+    /// API on. `None` (the default) disables the admin API entirely. When
+    /// set, the server creates the socket file (with mode 0600 — owner-
+    /// only access, since access to the socket implies full read access
+    /// to client/tunnel metadata) and serves `GET /api/v1/...` on it. See
+    /// [`server::admin`] for the route table.
+    pub admin_socket: Option<PathBuf>,
 }
 
 /// The server address the client was asked to connect to. Carries the full
