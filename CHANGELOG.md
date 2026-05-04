@@ -5,6 +5,153 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-03
+
+Wire-protocol overhaul. The per-stream `RemoteRequest` handshake — and
+the `announce_only` band-aid added in 0.7.0 — are gone. Clients now
+declare the full set of tunnels in a single **session hello** right
+after QUIC connect, the server validates them in one shot, and every
+subsequent data-plane bi-stream identifies itself with a small
+**`OpenConn`** frame keyed by the server-assigned `tunnel_id`. This
+matches chisel's session-config model and fixes a real conceptual
+asymmetry: forward, reverse, and SOCKS dynamic streams now share a
+single declaration path.
+
+### Breaking
+
+- **Wire format is not backward compatible with 0.7.x.** A 0.8 client
+  speaking to a 0.7 server (or vice-versa) will fail at the first
+  handshake — there is no fallback. Upgrade both sides together.
+- **`RemoteRequest` lost its `announce_only` and `from_socks` fields**
+  along with the `dynamic_tcp` / `dynamic_udp` constructors.
+  Embedders that built `RemoteRequest`s by hand should drop those
+  fields; SOCKS-originated dynamic targets are now carried as
+  [`OpenConn::dynamic`] under a parent SOCKS5 tunnel, validated once
+  at hello time.
+- **Forward SOCKS5 with `--allow-socks=false` now fails the entire
+  session at hello time** instead of binding a local SOCKS listener
+  and rejecting individual CONNECTs. The operator (and the client
+  log) sees the rejection immediately.
+
+### Added
+
+- **`SessionHello { remotes: Vec<RemoteRequest> }`** plus
+  `SessionHelloResponse::{Ok { tunnel_ids }, Failed(_)}` exchanged on
+  the very first bi-stream of every QUIC connection. Reverse tunnels
+  spawn their server-side listener as soon as the hello is accepted —
+  no more lazy registration.
+- **`OpenConn { tunnel_id, dynamic: Option<DynamicTarget> }`** plus
+  `OpenConnResponse` framing the start of every data-plane
+  bi-stream. `dynamic` is populated only for SOCKS5 dynamic streams
+  (per-CONNECT TCP target, per-target UDP); static tunnels reuse the
+  declared `kind` from the hello.
+- **`server_receive_session_hello` / `server_reply_session_hello` /
+  `client_send_session_hello` / `send_open_conn` /
+  `receive_open_conn` / `reply_open_conn`** in
+  `src/common/tunnel.rs`. The legacy
+  `client_send_remote_request` / `server_receive_remote_request`
+  pair has been removed.
+- **`ServerState::register_tunnels`** — bulk-registers every tunnel
+  declared in one hello, returning the freshly minted entries in
+  declaration order. Replaces the deduplicating
+  `find_or_create_tunnel`; the per-client `tunnel_index` field is
+  gone.
+
+### Changed
+
+- **Tunnel handlers take a `tunnel_id: u64` argument.** Affects
+  `tunnel_tcp_client`, `tunnel_udp_client`, `tunnel_socks_client`.
+  The id is the server-assigned identifier from the hello reply
+  (forward) or the tunnel's own id used by the server to push reverse
+  conns (reverse).
+- **Server validates every requested remote up front** via
+  `validate_remotes` against `--allow-reverse` / `--allow-socks`.
+  First offending declaration short-circuits the whole session with
+  a single `RemoteFailed` reason instead of rejecting per-stream.
+- **No more per-tunnel control bi-stream.** Reverse declarations,
+  forward TCP/UDP "first conn", and the 0.7 announce stream all
+  collapse into the single hello + per-conn `OpenConn` model.
+
+## [0.7.0] - 2026-05-03
+
+Phase-1 of the long-tracked **server admin API + CLI** README item: the
+server can now expose a read-only HTTP API over a unix domain socket so
+operators can list active clients, the tunnels each client declared,
+the live conns going through every tunnel, and per-tunnel / per-conn
+byte counters. A new `rusnel ctl` subcommand wraps the API for the
+shell.
+
+Write endpoints (kick client, kill conn), Prometheus `/metrics`, and
+the embedded web UI are explicit phase-2 follow-ups.
+
+### Added
+
+- **Three-layer client / tunnel / conn data model.** A *client* is one
+  connected client daemon (`rusnel client`) talking to this server; a
+  *tunnel* is the remote declaration that client established with the
+  server (deduplicated per client by spec, lives for the client's
+  lifetime); a *conn* is a single proxied network connection going
+  through a tunnel (one accepted local TCP socket, one per-source UDP
+  flow, one SOCKS5 CONNECT, one SOCKS5 UDP target). Tunnels expose
+  cumulative byte counters across every conn that ever ran through
+  them; conns expose live counters for their own bytes plus an
+  optional human-readable `peer` label.
+- **Read-only admin HTTP API enabled by default** at
+  `~/.rusnel/admin.sock` (parent directory auto-created, socket created
+  with mode `0600`). Serves
+  `GET /api/v1/{server,clients,clients/:id,clients/:id/{tunnels,conns},tunnels,tunnels/:id,tunnels/:id/conns,conns,conns/:id,history}`.
+  Filesystem permissions are the only auth: access to the socket
+  implies full read access to live client/tunnel/conn metadata.
+  Override with `--admin-socket <path>` (e.g. when running multiple
+  servers as the same uid); disable entirely with `--no-admin-socket`.
+- **`rusnel ctl` subcommand** — read-only client for the admin API.
+  Subcommands: `server`, `clients`, `client <id>`, `client-conns <id>`,
+  `tunnels`, `tunnel <id>`, `tunnel-conns <id>`, `conns`, `history`.
+  Output defaults to a tab-aligned table; `--json` passes the raw API
+  payload through. Defaults to the same `~/.rusnel/admin.sock` path
+  the server uses, so the zero-flag pairing just works; override with
+  `--socket <path>`.
+- **Per-tunnel byte counters** on the data plane. TCP-style copies
+  account via a new `CountedReader` wrapper around the existing
+  `BufReader` chain in `src/common/tcp.rs`; datagram paths
+  (`src/common/udp.rs`, `src/common/socks.rs`) bump the counters
+  directly with each datagram length. The `bytes_in` field counts data
+  received from the QUIC peer; `bytes_out` counts data sent to it. Both
+  use `Ordering::Relaxed` — the admin API is observability, not a sync
+  primitive.
+- **Bounded connection-history ring buffer** (256 entries, oldest
+  evicted). Each `HistoryEntry` carries the disconnect reason already
+  shown in the existing `client disconnected: ...` info log, so
+  operators can correlate.
+- **`tests/admin.rs`** end-to-end test: brings up server + client on
+  localhost, asserts socket mode is `0600`, exercises every read
+  endpoint, pushes bytes through a forward TCP tunnel, and confirms
+  per-tunnel `bytes_in` / `bytes_out` advance.
+- **`src/common/counted.rs`** — `TunnelCounters` (two `Arc<AtomicU64>`s
+  shareable between the admin API and the data plane) and
+  `CountedReader<R: AsyncRead>`. Unit-tested in-module.
+
+### Changed
+
+- **`ServerConfig` gains an `admin_socket: Option<PathBuf>` field.**
+  Library embedders must add it; existing CLI users only see the new
+  flag.
+- **Tunnel handler signatures take a new `Counters = Option<Arc<TunnelCounters>>`
+  argument.** The server passes `Some` for tunnels it has registered;
+  the client side always passes `None`. Affects
+  `tunnel_tcp_stream`, `tunnel_tcp_client`, `tunnel_tcp_server`,
+  `tunnel_udp_stream`, `tunnel_udp_client`, `tunnel_udp_server`, and
+  `tunnel_socks_client`.
+
+### Dependencies
+
+- Added: `axum 0.7` (json, tokio, http1, matched-path, query;
+  `default-features = false`), `hyper 1` (client + server, http1),
+  `hyper-util 0.1` (tokio + service), `http-body-util 0.1`, `tower 0.5`
+  (util only), `serde_json 1`. Total transitive footprint is small —
+  the existing `quinn` + `tokio` + `rustls` graph already pulls in most
+  of the supporting crates.
+
 ## [0.6.1] - 2026-05-03
 
 Follow-up to 0.6.0: extend the new `--allow-socks` server gate to cover

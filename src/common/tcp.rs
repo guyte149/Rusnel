@@ -1,14 +1,18 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::{
-    io::{AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
 use tracing::{debug, debug_span, info, Instrument};
 
-use crate::common::tunnel::client_send_remote_request;
+use crate::common::counted::{CountedReader, TunnelCounters};
+use crate::common::remote::OpenConn;
+use crate::common::tunnel::send_open_conn;
+use crate::server::state::TunnelHandle;
 
 use super::remote::RemoteRequest;
 
@@ -19,10 +23,48 @@ use super::remote::RemoteRequest;
 /// to keep memory use bounded under many concurrent connections.
 const TUNNEL_COPY_BUF: usize = 256 * 1024;
 
+/// Optional per-conn byte counter the server registers (and the
+/// client passes through as `None`). One [`TunnelCounters`] instance
+/// per accepted local connection / forward bi-stream / SOCKS CONNECT;
+/// see [`crate::server::state::ConnEntry`] for the lifecycle.
+pub type Counters = Option<Arc<TunnelCounters>>;
+
+/// Optional handle the server passes into long-lived reverse handlers
+/// (which spawn one conn per accept). When `Some`, each accept
+/// registers a [`crate::server::state::ConnEntry`] via
+/// [`TunnelHandle::open_conn`] and bumps that conn's counters
+/// for the duration of its [`crate::server::state::ConnGuard`].
+pub type TunnelHandleOpt = Option<Arc<TunnelHandle>>;
+
+/// Wrap an `AsyncRead` so each successful read bumps the QUIC peer's
+/// `bytes_in` counter (data received from the peer).
+fn count_in<R: AsyncRead + Unpin + Send + 'static>(
+    inner: R,
+    counters: &Counters,
+) -> Box<dyn AsyncRead + Unpin + Send> {
+    match counters {
+        Some(c) => Box::new(CountedReader::new(inner, c.in_handle())),
+        None => Box::new(inner),
+    }
+}
+
+/// Wrap an `AsyncRead` so each successful read bumps the QUIC peer's
+/// `bytes_out` counter (data we'll forward to the peer).
+fn count_out<R: AsyncRead + Unpin + Send + 'static>(
+    inner: R,
+    counters: &Counters,
+) -> Box<dyn AsyncRead + Unpin + Send> {
+    match counters {
+        Some(c) => Box::new(CountedReader::new(inner, c.out_handle())),
+        None => Box::new(inner),
+    }
+}
+
 pub async fn tunnel_tcp_stream(
     tcp_stream: TcpStream,
     mut send_channel: SendStream,
     recv_channel: RecvStream,
+    counters: Counters,
 ) -> Result<()> {
     // Disable Nagle on the TCP leg of the tunnel. Tunneled traffic is opaque
     // to us, so coalescing small writes can deadlock for ~40ms against the
@@ -49,8 +91,15 @@ pub async fn tunnel_tcp_stream(
     // batched `BufReader` + `copy_buf` is strictly better today on every
     // workload we benchmark; revisit when quinn exposes a vectored read API
     // that returns several `Bytes` per await.
+    //
+    // The `count_*` wrappers tally bytes per direction into the shared
+    // tunnel counters when the server is tracking this tunnel. With no
+    // counters configured (client side, or admin disabled) they're plain
+    // pass-throughs.
+    let tcp_recv = count_out(tcp_recv, &counters);
+    let quic_recv = count_in(recv_channel, &counters);
     let mut tcp_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, tcp_recv);
-    let mut quic_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, recv_channel);
+    let mut quic_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, quic_recv);
 
     let client_to_server = async {
         tokio::io::copy_buf(&mut tcp_recv, &mut send_channel).await?;
@@ -76,7 +125,12 @@ pub async fn tunnel_tcp_stream(
     Ok(())
 }
 
-pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
+pub async fn tunnel_tcp_client(
+    quic_connection: Connection,
+    remote: RemoteRequest,
+    handle: TunnelHandleOpt,
+    tunnel_id: u64,
+) -> Result<()> {
     // Use SocketAddr's Display so IPv6 literals come out bracketed
     // (`[::1]:8080`) — a manual `format!("{ip}:{port}")` on an IPv6
     // `IpAddr` produces `::1:8080`, which `TcpListener::bind` rejects.
@@ -92,15 +146,37 @@ pub async fn tunnel_tcp_client(quic_connection: Connection, remote: RemoteReques
         let span = debug_span!("conn", id = conn_id, peer = %addr);
 
         let connection = quic_connection.clone();
-        let remote = remote.clone();
+        let handle = handle.clone();
         tokio::spawn(
             async move {
                 debug!("open");
                 let (mut send, mut recv) = connection.open_bi().await?;
 
-                client_send_remote_request(&remote, &mut send, &mut recv).await?;
+                // Tell the peer which tunnel this stream belongs to.
+                // Static TCP tunnels carry no `dynamic` payload — the
+                // peer already knows the target from the tunnel's
+                // declaration in the session hello.
+                send_open_conn(
+                    &OpenConn {
+                        tunnel_id,
+                        dynamic: None,
+                    },
+                    &mut send,
+                    &mut recv,
+                )
+                .await?;
 
-                tunnel_tcp_stream(local_socket, send, recv).await?;
+                // Register this accepted connection as a conn against
+                // the parent tunnel (when admin tracking is enabled).
+                // The `ConnGuard` removes it again on drop, regardless
+                // of how the stream below ends.
+                let _conn_guard = handle.as_ref().map(|h| h.open_conn(Some(addr.to_string())));
+                if let Some(g) = _conn_guard.as_ref() {
+                    info!(conn_id = g.id(), peer = %addr, "conn opened");
+                }
+                let counters = _conn_guard.as_ref().map(|g| g.counters());
+
+                tunnel_tcp_stream(local_socket, send, recv, counters).await?;
                 Ok::<(), anyhow::Error>(())
             }
             .instrument(span),
@@ -112,6 +188,7 @@ pub async fn tunnel_tcp_server(
     recv_channel: RecvStream,
     send_channel: SendStream,
     request: RemoteRequest,
+    counters: Counters,
 ) -> Result<()> {
     let remote_addr = request
         .remote_addr_string()
@@ -120,7 +197,7 @@ pub async fn tunnel_tcp_server(
     let tcp_stream = TcpStream::connect(&remote_addr).await?;
     debug!("connected to {}", remote_addr);
 
-    tunnel_tcp_stream(tcp_stream, send_channel, recv_channel).await?;
+    tunnel_tcp_stream(tcp_stream, send_channel, recv_channel, counters).await?;
 
     Ok(())
 }

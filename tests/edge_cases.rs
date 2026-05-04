@@ -65,64 +65,40 @@ async fn test_reverse_rejected_when_not_allowed() {
     .expect("test_reverse_rejected_when_not_allowed timed out");
 }
 
-/// Forward `socks` requires `--allow-socks`. Without it, the client's local
-/// SOCKS5 listener still binds (the SOCKS handshake is purely client-side),
-/// but the per-CONNECT dynamic remote — which carries `from_socks=true` on
-/// the wire — must be rejected by the server, so any actual CONNECT through
-/// the SOCKS proxy fails to reach the target.
+/// Forward `socks` requires `--allow-socks`. Without it, the server
+/// rejects the session at hello time (the post-0.8 wire protocol
+/// validates every declared remote in one batch up front), so the
+/// client never gets past reconnect — its local SOCKS listener
+/// never binds.
 #[tokio::test]
 async fn test_forward_socks_rejected_when_not_allowed() {
     timeout(TEST_TIMEOUT, async {
         let server_port = get_available_port();
         let socks_port = get_available_port();
-        let target_port = get_available_port();
-
-        // Bind a target listener so the only reason a CONNECT could fail is
-        // the server-side ACL.
-        let _target = TcpListener::bind(format!("127.0.0.1:{target_port}"))
-            .await
-            .unwrap();
 
         let remote = RemoteRequest::from_str(&format!("127.0.0.1:{socks_port}:socks")).unwrap();
 
-        // allow_reverse=false, allow_socks=false — forward `socks` must be
-        // rejected by the server's `--allow-socks` gate even though the
-        // client-side listener comes up fine.
+        // allow_reverse=false, allow_socks=false — the hello must be
+        // rejected, leaving the client looping on reconnect with no
+        // local SOCKS listener bound.
         let _env = start_tunnel_with_flags(server_port, false, false, vec![remote]).await;
 
-        // SOCKS5 greeting + CONNECT to the target. The greeting itself is
-        // local to the client and should always succeed; the CONNECT
-        // attempts to open a server-side stream and must fail (the server
-        // closes it, surfacing as either a non-success SOCKS reply or an
-        // EOF on the SOCKS TCP connection).
-        let mut conn = TcpStream::connect(format!("127.0.0.1:{socks_port}"))
-            .await
-            .expect("connect to local SOCKS listener");
-        conn.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
-        let mut greet = [0u8; 2];
-        conn.read_exact(&mut greet).await.unwrap();
-        assert_eq!(greet, [0x05, 0x00]);
-
-        let mut req = vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1];
-        req.extend_from_slice(&target_port.to_be_bytes());
-        conn.write_all(&req).await.unwrap();
-
-        // Read whatever the SOCKS server sends back (or EOF). A successful
-        // CONNECT would reply with `[0x05, 0x00, ...]` (10 bytes for IPv4
-        // BND). Anything else means the server-side gate fired.
-        let mut reply = [0u8; 10];
-        match conn.read_exact(&mut reply).await {
-            Err(_) => { /* EOF before full reply: server-side stream closed. */ }
-            Ok(_) => assert_ne!(
-                reply[1], 0x00,
-                "expected SOCKS5 CONNECT to fail, but got success reply"
+        // Give the client a chance to settle into the reject loop, then
+        // verify the local SOCKS port is still unbindable-from-our-side
+        // (i.e. nothing is listening on it).
+        sleep(Duration::from_millis(300)).await;
+        let connect_res = timeout(
+            Duration::from_secs(2),
+            TcpStream::connect(format!("127.0.0.1:{socks_port}")),
+        )
+        .await;
+        match connect_res {
+            Ok(Ok(_)) => panic!(
+                "expected local SOCKS listener on port {socks_port} to never bind, but it accepted a connection"
             ),
+            Ok(Err(_)) => { /* expected: connection refused */ }
+            Err(_) => panic!("connect attempt unexpectedly hung"),
         }
-
-        // And the target listener must NOT have seen an inbound connection.
-        // We give the test a brief settling window then assert no accept
-        // happens within a short timeout.
-        sleep(Duration::from_millis(200)).await;
     })
     .await
     .expect("test_forward_socks_rejected_when_not_allowed timed out");

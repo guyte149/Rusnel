@@ -160,6 +160,88 @@ servers reachable via a v6-preferring resolver still connect within
 ~250 ms. Server-side resources (including reverse-tunnel listeners) are
 released the moment the QUIC connection drops.
 
+## Server admin API & `rusnel ctl`
+
+The server exposes a read-only admin HTTP API on a unix domain socket
+**by default**: `~/.rusnel/admin.sock`, created with mode `0600` (the
+parent directory is auto-created on first use). Filesystem permissions
+are the only auth — only the user that started the server can connect.
+
+```bash
+rusnel server --tls-self-signed              # admin enabled at ~/.rusnel/admin.sock
+rusnel server --tls-self-signed --no-admin-socket             # opt out entirely
+rusnel server --tls-self-signed --admin-socket /run/rusnel-a.sock  # override path
+```
+
+`--admin-socket <path>` overrides the default path (handy when running
+multiple servers as the same user). `--no-admin-socket` disables the
+listener entirely. The two flags are mutually exclusive.
+
+### Terminology: client, tunnel, conn
+
+The admin API and `ctl` model state in three layers, each with one
+meaning:
+
+- A **client** is one connected client daemon (`rusnel client`)
+  talking to this server. Lives for the lifetime of the QUIC
+  connection.
+- A **tunnel** is the *remote declaration* a client established with
+  the server (`R:5000=>socks`, `1080=>1.1.1.1:53/udp`, …). Deduplicated
+  per client by spec, exists for the lifetime of the client, and
+  exposes cumulative byte counters across every conn that ever ran
+  through it.
+- A **conn** is a single proxied network connection going through a
+  tunnel — one accepted local TCP connection on a forward TCP tunnel,
+  one accepted remote TCP connection on a reverse TCP tunnel, one
+  per-source UDP flow, one SOCKS5 CONNECT, one SOCKS5 UDP target. Each
+  conn has its own live byte counters and a free-form `peer` label.
+
+Query the API with `rusnel ctl` (or `curl --unix-socket`):
+
+```bash
+rusnel ctl clients                       # tab-aligned table by default
+rusnel ctl client 3                      # client detail incl. its tunnels
+rusnel ctl client-conns 3                # active conns across all of client 3's tunnels
+rusnel ctl tunnels                       # every tunnel across every client
+rusnel ctl tunnel 7                      # tunnel detail + its active conns
+rusnel ctl tunnel-conns 7                # just the conns on tunnel 7
+rusnel ctl conns --json                  # every active conn, raw JSON
+rusnel ctl history --limit 20            # recent client disconnects
+```
+
+`ctl` defaults to the same `~/.rusnel/admin.sock` path the server uses,
+so the zero-flag pairing just works. Pass `--socket <path>` to override
+when the server runs on a non-default path.
+
+The available endpoints (`GET` only in this release):
+
+| Path                                  | Purpose                                                       |
+|---------------------------------------|---------------------------------------------------------------|
+| `/api/v1/server`                      | version, listen addr, uptime, client/tunnel/conn counts       |
+| `/api/v1/clients`                     | one row per connected client with rolled-up totals            |
+| `/api/v1/clients/:id`                 | client detail, with embedded tunnel summaries                 |
+| `/api/v1/clients/:id/tunnels`         | tunnels owned by one client                                   |
+| `/api/v1/clients/:id/conns`           | active conns across all of one client's tunnels               |
+| `/api/v1/tunnels`                     | every tunnel across every client                              |
+| `/api/v1/tunnels/:id`                 | tunnel detail with its active conns embedded                  |
+| `/api/v1/tunnels/:id/conns`           | just the active conns on one tunnel                           |
+| `/api/v1/conns`                       | every active conn globally                                    |
+| `/api/v1/conns/:id`                   | one conn by id                                                |
+| `/api/v1/history?limit=N`             | bounded ring buffer (256) of recent disconnects               |
+
+Each tunnel exposes both `active_bytes_in/out` (live, from currently
+open conns) and `bytes_in/out` (cumulative, including bytes from conns
+that have already closed), plus `active_conn_count` and `total_conns`
+(lifetime, including closed). Conns expose just their own
+`bytes_in/out`. All counters are tallied from the server's perspective:
+`bytes_in` is data received from the QUIC peer, `bytes_out` is data
+sent to it. Atomics use relaxed ordering — the API is observability,
+not a sync primitive, so a slightly stale read is fine.
+
+Write operations (kick client, kill conn), Prometheus `/metrics`, and
+an embedded web UI are tracked as phase-2 follow-ups in the TODO
+section.
+
 ## Authentication
 
 Both the server and the client require an explicit TLS-mode flag — there is
@@ -194,7 +276,7 @@ rusnel client --tls-ca   ./pki/ca.pem --tls-cert ./pki/client.pem --tls-key ./pk
 
 ### Embedded credentials (drop-and-run binaries)
 
-For Sliver-style "drop the binary onto a host and have it just work" deployments,
+For dro-and-run deployments,
 Rusnel can bake credentials and a default server address into the binary at
 **build time** via `RUSNEL_EMBED_*` env vars. The resulting binary runs in the
 appropriate TLS mode with no flags required (CLI flags still override embedded
@@ -268,11 +350,9 @@ the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 - [ ] SSO / OIDC client auth via a `rusnel-issuer` daemon: client runs `rusnel client --sso https://issuer.corp.example`, completes a device-code flow against the org's IdP (Okta/Google/Auth0), and the issuer mints a short-lived (~8h) mTLS client cert with the user's email/groups in the SAN. Rusnel server only needs to trust the issuer's CA — no IdP knowledge in the data path. ACLs from the bullet above match on cert subject/groups.
 
 ### Operability
-- [ ] server admin API + CLI + web UI:
-  - typed `ServerState` (DashMap of clients/tunnels with bytes-in/out counters) populated from the existing per-connection / per-tunnel handlers.
-  - HTTP admin API on a unix socket (filesystem-perm gated) or TCP+mTLS: `GET /clients`, `GET /clients/:id/tunnels`, `GET /tunnels`, `DELETE /clients/:id` (kick), `GET /metrics` (Prometheus).
-  - `rusnel ctl clients|tunnels|kick` subcommand consuming that API.
-  - tiny embedded web UI (single `include_str!`'d HTML file, no JS framework) with a client/tunnel dashboard and bandwidth sparklines off `/metrics`.
+- [x] **server admin API (read-only) + CLI**: typed `ServerState` (DashMap of clients/tunnels/conns with cumulative + per-conn byte counters), HTTP admin API on a unix socket gated by filesystem perms (mode 0600), three-layer client/tunnel/conn model exposed via `rusnel ctl clients|client|client-conns|tunnels|tunnel|tunnel-conns|conns|history|server`. See "Server admin API & `rusnel ctl`" above.
+- [ ] **server admin API — phase 2**: `DELETE /clients/:id` (kick), `DELETE /tunnels/:id` (kill tunnel), `GET /metrics` (Prometheus exporter), optional TCP+mTLS transport so the API is reachable over the network with the same PKI as the tunnel control plane.
+- [ ] **embedded web UI**: tiny `include_str!`'d HTML file (no JS framework) with a client/tunnel dashboard and bandwidth sparklines off `/metrics`.
 
 ### Testing & CI
 - [ ] run `./benchmark/run.sh` on a self-hosted runner per release tag and commit the result PNGs back, so perf regressions surface in PRs

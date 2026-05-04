@@ -243,6 +243,22 @@ enum Mode {
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_connections: usize,
 
+        /// Path to the admin HTTP API unix socket.
+        ///
+        /// Defaults to `~/.rusnel/admin.sock` (auto-created with mode
+        /// 0600). Pass `--no-admin-socket` to disable the admin API
+        /// entirely; pass an explicit path here to override the default
+        /// (e.g. when running multiple rusnel servers as the same uid).
+        /// Query the API with `rusnel ctl ...` or
+        /// `curl --unix-socket <path> http://x/api/v1/clients`.
+        #[arg(long, value_name = "PATH", conflicts_with = "no_admin_socket")]
+        admin_socket: Option<PathBuf>,
+
+        /// Disable the admin HTTP API. Mutually exclusive with
+        /// `--admin-socket`.
+        #[arg(long, default_value_t = false)]
+        no_admin_socket: bool,
+
         /// enable verbose logging
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
@@ -388,6 +404,61 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
     Cert {
         #[command(subcommand)]
         action: CertAction,
+    },
+    /// Query a running server's admin API over a unix socket.
+    ///
+    /// The server must be started with --admin-socket <path>. By default
+    /// `ctl` looks at $XDG_RUNTIME_DIR/rusnel-admin.sock (Linux) or
+    /// /tmp/rusnel-admin-<uid>.sock (macOS / no XDG); pass --socket to
+    /// override. Output defaults to a tab-aligned table; pass --json to
+    /// pipe the raw API response.
+    Ctl {
+        /// Path to the admin unix socket.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+        /// Print the raw JSON API response instead of a formatted table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[command(subcommand)]
+        action: CtlAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CtlAction {
+    /// Print server info: version, listen address, uptime, client count.
+    Server,
+    /// List currently-connected clients.
+    Clients,
+    /// Show full detail (including tunnels) for one client.
+    Client {
+        /// Client id from `ctl clients`.
+        id: u64,
+    },
+    /// List active conns on one client (across all of its tunnels).
+    ClientConns {
+        /// Client id from `ctl clients`.
+        id: u64,
+    },
+    /// List every tunnel (remote declaration) across every client.
+    Tunnels,
+    /// Show full detail for one tunnel, including its active conns.
+    Tunnel {
+        /// Tunnel id from `ctl tunnels`.
+        id: u64,
+    },
+    /// List active conns going through one tunnel.
+    TunnelConns {
+        /// Tunnel id from `ctl tunnels`.
+        id: u64,
+    },
+    /// List every active conn across every tunnel.
+    Conns,
+    /// Recent client disconnects (most recent first).
+    History {
+        /// Cap on the number of rows to fetch.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 }
 
@@ -628,6 +699,8 @@ fn main() {
             tls_ca,
             congestion,
             max_connections,
+            admin_socket,
+            no_admin_socket,
             is_verbose,
             is_debug,
         } => {
@@ -667,6 +740,15 @@ fn main() {
                     None
                 } else {
                     Some(max_connections)
+                },
+                // Admin API is on by default at `~/.rusnel/admin.sock`
+                // — opt out with `--no-admin-socket`, override with
+                // `--admin-socket <PATH>`. Clap enforces the
+                // mutual-exclusion via `conflicts_with`.
+                admin_socket: if no_admin_socket {
+                    None
+                } else {
+                    Some(admin_socket.unwrap_or_else(rusnel::ctl::default_socket_path))
                 },
             };
             debug!("Initialized server with config: {:?}", server_config);
@@ -733,6 +815,24 @@ fn main() {
             debug!("Initialized client with config: {:?}", client_config);
             run_client(client_config);
         }
+        Mode::Ctl {
+            socket,
+            json,
+            action,
+        } => {
+            // ctl is a one-shot client; minimal logger so error messages
+            // surface but we don't pollute the formatted-table output.
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_target(false)
+                .without_time()
+                .init();
+            let socket_path = socket.unwrap_or_else(rusnel::ctl::default_socket_path);
+            if let Err(e) = run_ctl(&socket_path, json, action) {
+                eprintln!("ctl: {}", rusnel::ctl::flatten_error(e));
+                std::process::exit(1);
+            }
+        }
         Mode::Cert { action } => {
             // Cert generation is a one-shot tool, not a server. Use a minimal
             // INFO logger so file paths are visible without --verbose.
@@ -748,6 +848,61 @@ fn main() {
             }
         }
     }
+}
+
+fn run_ctl(socket: &std::path::Path, json: bool, action: CtlAction) -> anyhow::Result<()> {
+    use rusnel::ctl::{self, Format};
+    let format = if json { Format::Json } else { Format::Table };
+    let rt = tokio::runtime::Runtime::new()?;
+    let output = rt.block_on(async {
+        match action {
+            CtlAction::Server => {
+                let payload = ctl::get(socket, "/api/v1/server").await?;
+                ctl::render_server(payload, format)
+            }
+            CtlAction::Clients => {
+                let payload = ctl::get(socket, "/api/v1/clients").await?;
+                ctl::render_clients(payload, format)
+            }
+            CtlAction::Client { id } => {
+                let payload = ctl::get(socket, &format!("/api/v1/clients/{id}")).await?;
+                ctl::render_client_detail(payload, format)
+            }
+            CtlAction::ClientConns { id } => {
+                let payload = ctl::get(socket, &format!("/api/v1/clients/{id}/conns")).await?;
+                ctl::render_conns(payload, format)
+            }
+            CtlAction::Tunnels => {
+                let payload = ctl::get(socket, "/api/v1/tunnels").await?;
+                ctl::render_tunnels(payload, format)
+            }
+            CtlAction::Tunnel { id } => {
+                let payload = ctl::get(socket, &format!("/api/v1/tunnels/{id}")).await?;
+                ctl::render_tunnel_detail(payload, format)
+            }
+            CtlAction::TunnelConns { id } => {
+                let payload = ctl::get(socket, &format!("/api/v1/tunnels/{id}/conns")).await?;
+                ctl::render_conns(payload, format)
+            }
+            CtlAction::Conns => {
+                let payload = ctl::get(socket, "/api/v1/conns").await?;
+                ctl::render_conns(payload, format)
+            }
+            CtlAction::History { limit } => {
+                let path = match limit {
+                    Some(n) => format!("/api/v1/history?limit={n}"),
+                    None => "/api/v1/history".to_string(),
+                };
+                let payload = ctl::get(socket, &path).await?;
+                ctl::render_history(payload, format)
+            }
+        }
+    })?;
+    print!("{output}");
+    if !output.ends_with('\n') {
+        println!();
+    }
+    Ok(())
 }
 
 fn run_cert(action: CertAction) -> anyhow::Result<()> {

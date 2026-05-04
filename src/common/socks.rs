@@ -11,9 +11,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{debug, debug_span, error, info, warn, Instrument};
 
-use super::remote::{HostPort, RemoteRequest};
-use super::tcp::tunnel_tcp_stream;
-use super::tunnel::client_send_remote_request;
+use super::remote::{DynamicTarget, HostPort, OpenConn, RemoteRequest};
+use super::tcp::{tunnel_tcp_stream, Counters, TunnelHandleOpt};
+use super::tunnel::send_open_conn;
 use super::udp::{read_datagram, write_datagram};
 use anyhow::{anyhow, Result};
 
@@ -26,12 +26,17 @@ const SOCKS_MAX_DATAGRAM: usize = 65_535;
 /// debug log) instead of blocking the receive loop.
 const SOCKS_UDP_CHANNEL_CAPACITY: usize = 4096;
 
-/// How long a per (src, target) UDP-over-SOCKS5 session may sit idle before
+/// How long a per (src, target) UDP-over-SOCKS5 conn may sit idle before
 /// we tear down the QUIC stream. Mirrors the static UDP forward timeout so
 /// the two paths age out resources in lockstep.
 const SOCKS_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
+pub async fn tunnel_socks_client(
+    quic_connection: Connection,
+    remote: RemoteRequest,
+    handle: TunnelHandleOpt,
+    tunnel_id: u64,
+) -> Result<()> {
     let local_addr = remote.local_socket_addr();
     let listener = TcpListener::bind(local_addr).await?;
     info!("SOCKS5 listening on {}", local_addr);
@@ -42,6 +47,7 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
         let (mut local_conn, peer_addr) = listener.accept().await?;
         let connection = quic_connection.clone();
         let remote = remote.clone();
+        let tunnel_handle = handle.clone();
         let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed) + 1;
         let span = debug_span!("conn", id = conn_id, peer = %peer_addr);
 
@@ -60,8 +66,7 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
 
                 match request {
                     SocksRequest::Connect(target) => {
-                        let dynamic_remote = remote.dynamic_tcp(target);
-                        debug!(target_remote = %dynamic_remote, "SOCKS5 CONNECT");
+                        debug!(target = %target, "SOCKS5 CONNECT");
 
                         let (send, recv) = match connection.open_bi().await {
                             Ok(stream) => stream,
@@ -71,17 +76,42 @@ pub async fn tunnel_socks_client(quic_connection: Connection, remote: RemoteRequ
                             }
                         };
 
-                        if let Err(e) =
-                            start_client_dynamic_tunnel(local_conn, send, recv, dynamic_remote)
-                                .await
+                        // One admin conn per SOCKS CONNECT, labelled
+                        // with the SOCKS client's source plus the target
+                        // it asked for so operators can spot which CONNECT
+                        // is blocking on what.
+                        let _conn_guard = tunnel_handle
+                            .as_ref()
+                            .map(|h| h.open_conn(Some(format!("{peer_addr}=>{target}"))));
+                        if let Some(g) = _conn_guard.as_ref() {
+                            info!(
+                                conn_id = g.id(),
+                                peer = %peer_addr,
+                                target = %target,
+                                "conn opened"
+                            );
+                        }
+                        let counters = _conn_guard.as_ref().map(|g| g.counters());
+
+                        if let Err(e) = start_client_dynamic_tunnel(
+                            local_conn, send, recv, tunnel_id, target, counters,
+                        )
+                        .await
                         {
                             error!("dynamic tunnel error: {}", e);
                         }
                     }
                     SocksRequest::UdpAssociate => {
                         debug!("SOCKS5 UDP ASSOCIATE");
-                        if let Err(e) =
-                            handle_socks_udp_associate(connection, local_conn, &remote).await
+                        if let Err(e) = handle_socks_udp_associate(
+                            connection,
+                            local_conn,
+                            &remote,
+                            tunnel_handle,
+                            peer_addr,
+                            tunnel_id,
+                        )
+                        .await
                         {
                             error!("UDP ASSOCIATE error: {}", e);
                         }
@@ -97,15 +127,25 @@ async fn start_client_dynamic_tunnel(
     mut socks_conn: TcpStream,
     mut send_channel: SendStream,
     mut recv_channel: RecvStream,
-    dynamic_remote: RemoteRequest,
+    tunnel_id: u64,
+    target: HostPort,
+    counters: Counters,
 ) -> Result<()> {
-    client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: Some(DynamicTarget::Tcp(target)),
+        },
+        &mut send_channel,
+        &mut recv_channel,
+    )
+    .await?;
 
     socks_conn
         .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
 
-    tunnel_tcp_stream(socks_conn, send_channel, recv_channel).await?;
+    tunnel_tcp_stream(socks_conn, send_channel, recv_channel, counters).await?;
 
     Ok(())
 }
@@ -214,6 +254,9 @@ async fn handle_socks_udp_associate(
     quic_connection: Connection,
     mut tcp_conn: TcpStream,
     original_remote: &RemoteRequest,
+    handle: TunnelHandleOpt,
+    socks_peer: SocketAddr,
+    tunnel_id: u64,
 ) -> Result<()> {
     // Bind a UDP socket on the same local IP we listen on. Port 0 lets the
     // OS pick — we report the chosen port back to the SOCKS client in the
@@ -230,10 +273,12 @@ async fn handle_socks_udp_associate(
     // Spawn the relay; abort it when the TCP control connection closes.
     let relay_handle = tokio::spawn({
         let connection = quic_connection.clone();
-        let remote = original_remote.clone();
         let socket = udp_socket.clone();
+        let handle = handle.clone();
         async move {
-            if let Err(e) = run_socks_udp_relay(connection, remote, socket).await {
+            if let Err(e) =
+                run_socks_udp_relay(connection, tunnel_id, socket, handle, socks_peer).await
+            {
                 debug!("UDP ASSOCIATE relay ended: {}", e);
             }
         }
@@ -279,15 +324,16 @@ async fn write_socks_udp_associate_reply(conn: &mut TcpStream, addr: SocketAddr)
 /// UDP framing and sent to the original SOCKS UDP source.
 async fn run_socks_udp_relay(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
+    handle: TunnelHandleOpt,
+    socks_peer: SocketAddr,
 ) -> Result<()> {
     // Key by (source, target): this preserves source isolation (so two
     // different SOCKS clients sharing the same association never see each
     // other's traffic) and target isolation (so replies on each per-target
     // QUIC stream can be wrapped with the correct DST.ADDR/PORT header).
-    let sessions: Arc<DashMap<(SocketAddr, HostPort), mpsc::Sender<Bytes>>> =
-        Arc::new(DashMap::new());
+    let conns: Arc<DashMap<(SocketAddr, HostPort), mpsc::Sender<Bytes>>> = Arc::new(DashMap::new());
 
     let mut buf = vec![0u8; SOCKS_MAX_DATAGRAM];
     loop {
@@ -301,10 +347,10 @@ async fn run_socks_udp_relay(
         };
 
         let key = (src, target.clone());
-        let mut existing = sessions.get(&key).map(|e| e.value().clone());
+        let mut existing = conns.get(&key).map(|e| e.value().clone());
         if let Some(tx) = &existing {
             if tx.is_closed() {
-                sessions.remove(&key);
+                conns.remove(&key);
                 existing = None;
             }
         }
@@ -312,21 +358,23 @@ async fn run_socks_udp_relay(
             Some(tx) => tx,
             None => {
                 let (tx, rx) = mpsc::channel(SOCKS_UDP_CHANNEL_CAPACITY);
-                sessions.insert(key.clone(), tx.clone());
-                spawn_socks_udp_session(
+                conns.insert(key.clone(), tx.clone());
+                spawn_socks_udp_conn(
                     quic_connection.clone(),
-                    remote.clone(),
+                    tunnel_id,
                     udp_socket.clone(),
                     src,
                     target.clone(),
                     rx,
-                    sessions.clone(),
+                    conns.clone(),
+                    handle.clone(),
+                    socks_peer,
                 );
                 tx
             }
         };
 
-        // UDP is unreliable: drop on backpressure or after the session
+        // UDP is unreliable: drop on backpressure or after the conn
         // terminated rather than blocking the receive loop.
         if let Err(e) = tx.try_send(Bytes::copy_from_slice(payload)) {
             debug!(peer = %src, target = %target, "dropping UDP datagram: {}", e);
@@ -335,53 +383,94 @@ async fn run_socks_udp_relay(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_socks_udp_session(
+fn spawn_socks_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     target: HostPort,
     rx: mpsc::Receiver<Bytes>,
-    sessions: Arc<DashMap<(SocketAddr, HostPort), mpsc::Sender<Bytes>>>,
+    conns: Arc<DashMap<(SocketAddr, HostPort), mpsc::Sender<Bytes>>>,
+    handle: TunnelHandleOpt,
+    socks_peer: SocketAddr,
 ) {
     let key = (source, target.clone());
     tokio::spawn(async move {
-        debug!(peer = %source, target = %target, "opening SOCKS5 UDP session");
-        if let Err(e) =
-            run_socks_udp_session(quic_connection, remote, udp_socket, source, target, rx).await
-        {
-            warn!(peer = %source, "SOCKS5 UDP session ended: {}", e);
+        debug!(peer = %source, target = %target, "opening SOCKS5 UDP conn");
+        // One admin conn per (SOCKS-source, UDP-target) pair so the
+        // operator can spot a single greedy target over a shared
+        // SOCKS UDP association.
+        let _conn_guard = handle
+            .as_ref()
+            .map(|h| h.open_conn(Some(format!("{socks_peer}=>{target}"))));
+        if let Some(g) = _conn_guard.as_ref() {
+            info!(
+                conn_id = g.id(),
+                peer = %socks_peer,
+                target = %target,
+                "conn opened"
+            );
         }
-        sessions.remove(&key);
-        debug!(peer = %key.0, target = %key.1, "SOCKS5 UDP session removed");
+        let counters = _conn_guard.as_ref().map(|g| g.counters());
+        if let Err(e) = run_socks_udp_conn(
+            quic_connection,
+            tunnel_id,
+            udp_socket,
+            source,
+            target,
+            rx,
+            counters,
+        )
+        .await
+        {
+            warn!(peer = %source, "SOCKS5 UDP conn ended: {}", e);
+        }
+        conns.remove(&key);
+        debug!(peer = %key.0, target = %key.1, "SOCKS5 UDP conn removed");
     });
 }
 
-async fn run_socks_udp_session(
+#[allow(clippy::too_many_arguments)]
+async fn run_socks_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     target: HostPort,
     mut rx: mpsc::Receiver<Bytes>,
+    counters: Counters,
 ) -> Result<()> {
-    // Manufacture a UDP forward dynamic-remote pointing at the per-datagram
-    // target the SOCKS client asked for, then drive the same length-prefixed
-    // QUIC framing the static UDP forward path uses.
-    let dynamic_remote = remote.dynamic_udp(target.clone());
+    // Open a fresh QUIC bi-stream and announce it as a SOCKS5 dynamic
+    // UDP conn under the parent SOCKS5 tunnel — the server uses the
+    // attached `DynamicTarget::Udp(target)` to dial the right
+    // destination. Same length-prefixed datagram framing as the
+    // static UDP forward path beyond this point.
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
-    client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: Some(DynamicTarget::Udp(target.clone())),
+        },
+        &mut send_channel,
+        &mut recv_channel,
+    )
+    .await?;
 
     // Forward SOCKS-side datagrams onto the QUIC stream until the rx side
-    // closes (relay loop dropped the session) or the session sits idle long
+    // closes (relay loop dropped the conn) or the conn sits idle long
     // enough to age out.
     let local_to_quic = async {
         loop {
             match tokio::time::timeout(SOCKS_UDP_IDLE_TIMEOUT, rx.recv()).await {
-                Ok(Some(payload)) => write_datagram(&mut send_channel, &payload).await?,
+                Ok(Some(payload)) => {
+                    write_datagram(&mut send_channel, &payload).await?;
+                    if let Some(c) = counters.as_ref() {
+                        c.add_out(payload.len() as u64);
+                    }
+                }
                 Ok(None) => return Ok::<(), anyhow::Error>(()),
                 Err(_) => {
-                    debug!(peer = %source, target = %target, "SOCKS5 UDP session idle timeout");
+                    debug!(peer = %source, target = %target, "SOCKS5 UDP conn idle timeout");
                     return Ok(());
                 }
             }
@@ -389,7 +478,7 @@ async fn run_socks_udp_session(
     };
 
     // Wrap each QUIC-arriving reply in a SOCKS5 UDP header naming this
-    // session's target, then send it to the original SOCKS client UDP
+    // conn's target, then send it to the original SOCKS client UDP
     // source.
     let quic_to_local = async {
         let mut buf = vec![0u8; SOCKS_MAX_DATAGRAM];
@@ -398,6 +487,9 @@ async fn run_socks_udp_session(
             let payload = read_datagram(&mut recv_channel, &mut buf).await?;
             wrap_socks_udp_reply(&target, payload, &mut wrap);
             udp_socket.send_to(&wrap, source).await?;
+            if let Some(c) = counters.as_ref() {
+                c.add_in(payload.len() as u64);
+            }
         }
     };
 
@@ -455,7 +547,7 @@ fn parse_socks_udp_header(buf: &[u8]) -> Result<(HostPort, &[u8])> {
 }
 
 /// Wrap a reply UDP payload with the SOCKS5 UDP datagram header, addressed
-/// from the target this session is talking to. Re-uses the supplied scratch
+/// from the target this conn is talking to. Re-uses the supplied scratch
 /// buffer so we don't allocate per reply.
 fn wrap_socks_udp_reply(target: &HostPort, payload: &[u8], buf: &mut Vec<u8>) {
     buf.clear();

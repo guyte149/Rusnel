@@ -10,7 +10,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::common::tunnel::client_send_remote_request;
+use crate::common::remote::OpenConn;
+use crate::common::tcp::{Counters, TunnelHandleOpt};
+use crate::common::tunnel::send_open_conn;
 
 use super::remote::RemoteRequest;
 
@@ -18,17 +20,17 @@ use super::remote::RemoteRequest;
 /// payload at 65 507 bytes; round up to a power of two for the buffer.
 const MAX_DATAGRAM: usize = 65_535;
 
-/// How long a per-source UDP session may sit idle (no packets in either
+/// How long a per-source UDP conn may sit idle (no packets in either
 /// direction) before we tear down the QUIC stream and free the entry. Long
 /// enough to outlast typical request/response patterns; short enough that
 /// `HashMap` doesn't grow unbounded under churn.
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Bound on per-session backpressure. UDP is unreliable, so on overflow we
+/// Bound on per-conn backpressure. UDP is unreliable, so on overflow we
 /// drop the datagram (with a debug log) rather than block the receive loop.
 /// Sized generously to absorb traffic bursts during the initial RTT it takes
 /// to open the per-source QUIC stream.
-const SESSION_CHANNEL_CAPACITY: usize = 4096;
+const CONN_CHANNEL_CAPACITY: usize = 4096;
 
 /// Total bytes the rolling `BytesMut` pool keeps reserved at a time.
 /// Empirically wide enough to amortize allocations when receivers are
@@ -77,13 +79,19 @@ pub async fn tunnel_udp_stream(
     udp_address: SocketAddr,
     send_channel: SendStream,
     recv_channel: RecvStream,
+    counters: Counters,
 ) -> Result<()> {
     // tokio::join! (not try_join!) so a write error in one direction does not
     // cancel an in-flight read in the other (#20 §3). UDP is unreliable so we
     // just log and let the connection close.
     let (l2q, q2l) = tokio::join!(
-        pump_socket_to_stream(udp_socket.clone(), udp_address, send_channel),
-        pump_stream_to_socket(udp_socket, udp_address, recv_channel),
+        pump_socket_to_stream(
+            udp_socket.clone(),
+            udp_address,
+            send_channel,
+            counters.clone()
+        ),
+        pump_stream_to_socket(udp_socket, udp_address, recv_channel, counters),
     );
     if let Err(e) = l2q {
         debug!("local→quic error: {}", e);
@@ -102,6 +110,7 @@ async fn pump_socket_to_stream(
     udp_socket: Arc<UdpSocket>,
     udp_address: SocketAddr,
     mut send: SendStream,
+    counters: Counters,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
@@ -111,6 +120,12 @@ async fn pump_socket_to_stream(
             continue;
         }
         write_datagram(&mut send, &buf[..len]).await?;
+        // Datagrams pumped onto the QUIC stream count toward `bytes_out`
+        // (data we forward to the QUIC peer). UDP framing overhead is a
+        // few bytes per datagram and intentionally not included.
+        if let Some(c) = counters.as_ref() {
+            c.add_out(len as u64);
+        }
     }
 }
 
@@ -118,18 +133,27 @@ async fn pump_stream_to_socket(
     udp_socket: Arc<UdpSocket>,
     udp_address: SocketAddr,
     mut recv: RecvStream,
+    counters: Counters,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
         let payload = read_datagram(&mut recv, &mut buf).await?;
         udp_socket.send_to(payload, &udp_address).await?;
+        if let Some(c) = counters.as_ref() {
+            c.add_in(payload.len() as u64);
+        }
     }
 }
 
 /// Client-side forward UDP: accept datagrams from any number of local
-/// senders and multiplex each source onto its own QUIC bi-stream. Sessions
-/// are torn down after `SESSION_IDLE_TIMEOUT` of inactivity.
-pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteRequest) -> Result<()> {
+/// senders and multiplex each source onto its own QUIC bi-stream. Conns
+/// are torn down after `CONN_IDLE_TIMEOUT` of inactivity.
+pub async fn tunnel_udp_client(
+    quic_connection: Connection,
+    remote: RemoteRequest,
+    handle: TunnelHandleOpt,
+    tunnel_id: u64,
+) -> Result<()> {
     let listen_addr = remote.local_socket_addr();
     let udp_socket = Arc::new(UdpSocket::bind(listen_addr).await?);
 
@@ -138,13 +162,13 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
     // DashMap (sharded RwLock) replaces a single global Mutex<HashMap> so the
     // per-source lookup on every received datagram doesn't serialize the
     // receive loop under high pps from many sources.
-    let sessions: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>> = Arc::new(DashMap::new());
+    let conns: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>> = Arc::new(DashMap::new());
 
     // Rolling `BytesMut` pool. Each iteration extends `recv_buf` back up to
     // `MAX_DATAGRAM`, reads into it, and hands the populated prefix to the
-    // session as a zero-copy frozen [`Bytes`] via `split_to(...).freeze()`.
+    // conn as a zero-copy frozen [`Bytes`] via `split_to(...).freeze()`.
     // The underlying allocation is shared (Arc-refcounted inside `Bytes`),
-    // so once a session has consumed its packet the bytes return to the
+    // so once a conn has consumed its packet the bytes return to the
     // pool instead of forcing a fresh allocation per inbound datagram
     // (#21 §3). When all outstanding handles point into a fully-consumed
     // arena, `reserve` on the next loop reuses it in place.
@@ -157,33 +181,34 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
         let (n, src) = udp_socket.recv_from(&mut recv_buf[..]).await?;
         let payload = recv_buf.split_to(n).freeze();
 
-        // Look up an existing session, or open a new one for this source.
-        // Drop the entry if its session has already terminated.
-        let mut existing = sessions.get(&src).map(|e| e.value().clone());
+        // Look up an existing conn, or open a new one for this source.
+        // Drop the entry if its conn has already terminated.
+        let mut existing = conns.get(&src).map(|e| e.value().clone());
         if let Some(tx) = &existing {
             if tx.is_closed() {
-                sessions.remove(&src);
+                conns.remove(&src);
                 existing = None;
             }
         }
         let sender = match existing {
             Some(tx) => tx,
             None => {
-                let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
-                sessions.insert(src, tx.clone());
-                spawn_udp_session(
+                let (tx, rx) = mpsc::channel(CONN_CHANNEL_CAPACITY);
+                conns.insert(src, tx.clone());
+                spawn_udp_conn(
                     quic_connection.clone(),
-                    remote.clone(),
                     udp_socket.clone(),
                     src,
                     rx,
-                    sessions.clone(),
+                    conns.clone(),
+                    handle.clone(),
+                    tunnel_id,
                 );
                 tx
             }
         };
 
-        // UDP is unreliable — if the session is backpressured or has already
+        // UDP is unreliable — if the conn is backpressured or has already
         // terminated, dropping the packet is correct.
         if let Err(e) = sender.try_send(payload) {
             debug!(peer = %src, "dropping UDP datagram: {}", e);
@@ -191,43 +216,70 @@ pub async fn tunnel_udp_client(quic_connection: Connection, remote: RemoteReques
     }
 }
 
-fn spawn_udp_session(
+#[allow(clippy::too_many_arguments)]
+fn spawn_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     rx: mpsc::Receiver<Bytes>,
-    sessions: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>>,
+    conns: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>>,
+    handle: TunnelHandleOpt,
+    tunnel_id: u64,
 ) {
     tokio::spawn(async move {
-        debug!(peer = %source, "opening UDP session");
-        if let Err(e) = run_udp_session(quic_connection, remote, udp_socket, source, rx).await {
-            warn!(peer = %source, "UDP session ended: {}", e);
+        debug!(peer = %source, "opening UDP conn");
+        // Per-source UDP aggregator → one admin-side conn, scoped to
+        // the lifetime of the spawn.
+        let _conn_guard = handle
+            .as_ref()
+            .map(|h| h.open_conn(Some(source.to_string())));
+        if let Some(g) = _conn_guard.as_ref() {
+            info!(conn_id = g.id(), peer = %source, "conn opened");
         }
-        sessions.remove(&source);
-        debug!(peer = %source, "UDP session removed");
+        let counters = _conn_guard.as_ref().map(|g| g.counters());
+        if let Err(e) =
+            run_udp_conn(quic_connection, tunnel_id, udp_socket, source, rx, counters).await
+        {
+            warn!(peer = %source, "UDP conn ended: {}", e);
+        }
+        conns.remove(&source);
+        debug!(peer = %source, "UDP conn removed");
     });
 }
 
-async fn run_udp_session(
+async fn run_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     mut rx: mpsc::Receiver<Bytes>,
+    counters: Counters,
 ) -> Result<()> {
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
-    client_send_remote_request(&remote, &mut send_channel, &mut recv_channel).await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: None,
+        },
+        &mut send_channel,
+        &mut recv_channel,
+    )
+    .await?;
 
     // Forward locally-received datagrams onto the QUIC stream until the local
-    // sender goes silent for SESSION_IDLE_TIMEOUT.
+    // sender goes silent for CONN_IDLE_TIMEOUT.
     let local_to_quic = async {
         loop {
-            match tokio::time::timeout(SESSION_IDLE_TIMEOUT, rx.recv()).await {
-                Ok(Some(payload)) => write_datagram(&mut send_channel, &payload).await?,
+            match tokio::time::timeout(CONN_IDLE_TIMEOUT, rx.recv()).await {
+                Ok(Some(payload)) => {
+                    write_datagram(&mut send_channel, &payload).await?;
+                    if let Some(c) = counters.as_ref() {
+                        c.add_out(payload.len() as u64);
+                    }
+                }
                 Ok(None) => return Ok::<(), anyhow::Error>(()), // sender side closed
                 Err(_) => {
-                    debug!(peer = %source, "UDP session idle timeout");
+                    debug!(peer = %source, "UDP conn idle timeout");
                     return Ok(());
                 }
             }
@@ -242,10 +294,13 @@ async fn run_udp_session(
         loop {
             let payload = read_datagram(&mut recv_channel, &mut buf).await?;
             udp_socket.send_to(payload, &source).await?;
+            if let Some(c) = counters.as_ref() {
+                c.add_in(payload.len() as u64);
+            }
         }
     };
 
-    // Either branch finishing tears the session down — UDP has no "half-close"
+    // Either branch finishing tears the conn down — UDP has no "half-close"
     // worth preserving here.
     tokio::select! {
         r = local_to_quic => r,
@@ -257,6 +312,7 @@ pub async fn tunnel_udp_server(
     recv_channel: RecvStream,
     send_channel: SendStream,
     request: RemoteRequest,
+    counters: Counters,
 ) -> Result<()> {
     let remote_addr: SocketAddr = request
         .remote_addr_string()
@@ -275,7 +331,14 @@ pub async fn tunnel_udp_server(
 
     debug!("connecting to {}", remote_addr);
 
-    tunnel_udp_stream(udp_socket, remote_addr, send_channel, recv_channel).await?;
+    tunnel_udp_stream(
+        udp_socket,
+        remote_addr,
+        send_channel,
+        recv_channel,
+        counters,
+    )
+    .await?;
 
     Ok(())
 }
