@@ -11,9 +11,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{debug, debug_span, error, info, warn, Instrument};
 
-use super::remote::{HostPort, RemoteRequest};
+use super::remote::{DynamicTarget, HostPort, OpenConn, RemoteRequest};
 use super::tcp::{tunnel_tcp_stream, Counters, TunnelHandleOpt};
-use super::tunnel::client_send_remote_request;
+use super::tunnel::send_open_conn;
 use super::udp::{read_datagram, write_datagram};
 use anyhow::{anyhow, Result};
 
@@ -35,6 +35,7 @@ pub async fn tunnel_socks_client(
     quic_connection: Connection,
     remote: RemoteRequest,
     handle: TunnelHandleOpt,
+    tunnel_id: u64,
 ) -> Result<()> {
     let local_addr = remote.local_socket_addr();
     let listener = TcpListener::bind(local_addr).await?;
@@ -65,8 +66,7 @@ pub async fn tunnel_socks_client(
 
                 match request {
                     SocksRequest::Connect(target) => {
-                        let dynamic_remote = remote.dynamic_tcp(target.clone());
-                        debug!(target_remote = %dynamic_remote, "SOCKS5 CONNECT");
+                        debug!(target = %target, "SOCKS5 CONNECT");
 
                         let (send, recv) = match connection.open_bi().await {
                             Ok(stream) => stream,
@@ -83,14 +83,18 @@ pub async fn tunnel_socks_client(
                         let _conn_guard = tunnel_handle
                             .as_ref()
                             .map(|h| h.open_conn(Some(format!("{peer_addr}=>{target}"))));
+                        if let Some(g) = _conn_guard.as_ref() {
+                            info!(
+                                conn_id = g.id(),
+                                peer = %peer_addr,
+                                target = %target,
+                                "conn opened"
+                            );
+                        }
                         let counters = _conn_guard.as_ref().map(|g| g.counters());
 
                         if let Err(e) = start_client_dynamic_tunnel(
-                            local_conn,
-                            send,
-                            recv,
-                            dynamic_remote,
-                            counters,
+                            local_conn, send, recv, tunnel_id, target, counters,
                         )
                         .await
                         {
@@ -105,6 +109,7 @@ pub async fn tunnel_socks_client(
                             &remote,
                             tunnel_handle,
                             peer_addr,
+                            tunnel_id,
                         )
                         .await
                         {
@@ -122,10 +127,19 @@ async fn start_client_dynamic_tunnel(
     mut socks_conn: TcpStream,
     mut send_channel: SendStream,
     mut recv_channel: RecvStream,
-    dynamic_remote: RemoteRequest,
+    tunnel_id: u64,
+    target: HostPort,
     counters: Counters,
 ) -> Result<()> {
-    client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: Some(DynamicTarget::Tcp(target)),
+        },
+        &mut send_channel,
+        &mut recv_channel,
+    )
+    .await?;
 
     socks_conn
         .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
@@ -242,6 +256,7 @@ async fn handle_socks_udp_associate(
     original_remote: &RemoteRequest,
     handle: TunnelHandleOpt,
     socks_peer: SocketAddr,
+    tunnel_id: u64,
 ) -> Result<()> {
     // Bind a UDP socket on the same local IP we listen on. Port 0 lets the
     // OS pick — we report the chosen port back to the SOCKS client in the
@@ -258,12 +273,11 @@ async fn handle_socks_udp_associate(
     // Spawn the relay; abort it when the TCP control connection closes.
     let relay_handle = tokio::spawn({
         let connection = quic_connection.clone();
-        let remote = original_remote.clone();
         let socket = udp_socket.clone();
         let handle = handle.clone();
         async move {
             if let Err(e) =
-                run_socks_udp_relay(connection, remote, socket, handle, socks_peer).await
+                run_socks_udp_relay(connection, tunnel_id, socket, handle, socks_peer).await
             {
                 debug!("UDP ASSOCIATE relay ended: {}", e);
             }
@@ -310,7 +324,7 @@ async fn write_socks_udp_associate_reply(conn: &mut TcpStream, addr: SocketAddr)
 /// UDP framing and sent to the original SOCKS UDP source.
 async fn run_socks_udp_relay(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     handle: TunnelHandleOpt,
     socks_peer: SocketAddr,
@@ -347,7 +361,7 @@ async fn run_socks_udp_relay(
                 conns.insert(key.clone(), tx.clone());
                 spawn_socks_udp_conn(
                     quic_connection.clone(),
-                    remote.clone(),
+                    tunnel_id,
                     udp_socket.clone(),
                     src,
                     target.clone(),
@@ -371,7 +385,7 @@ async fn run_socks_udp_relay(
 #[allow(clippy::too_many_arguments)]
 fn spawn_socks_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     target: HostPort,
@@ -389,10 +403,18 @@ fn spawn_socks_udp_conn(
         let _conn_guard = handle
             .as_ref()
             .map(|h| h.open_conn(Some(format!("{socks_peer}=>{target}"))));
+        if let Some(g) = _conn_guard.as_ref() {
+            info!(
+                conn_id = g.id(),
+                peer = %socks_peer,
+                target = %target,
+                "conn opened"
+            );
+        }
         let counters = _conn_guard.as_ref().map(|g| g.counters());
         if let Err(e) = run_socks_udp_conn(
             quic_connection,
-            remote,
+            tunnel_id,
             udp_socket,
             source,
             target,
@@ -411,19 +433,28 @@ fn spawn_socks_udp_conn(
 #[allow(clippy::too_many_arguments)]
 async fn run_socks_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     target: HostPort,
     mut rx: mpsc::Receiver<Bytes>,
     counters: Counters,
 ) -> Result<()> {
-    // Manufacture a UDP forward dynamic-remote pointing at the per-datagram
-    // target the SOCKS client asked for, then drive the same length-prefixed
-    // QUIC framing the static UDP forward path uses.
-    let dynamic_remote = remote.dynamic_udp(target.clone());
+    // Open a fresh QUIC bi-stream and announce it as a SOCKS5 dynamic
+    // UDP conn under the parent SOCKS5 tunnel — the server uses the
+    // attached `DynamicTarget::Udp(target)` to dial the right
+    // destination. Same length-prefixed datagram framing as the
+    // static UDP forward path beyond this point.
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
-    client_send_remote_request(&dynamic_remote, &mut send_channel, &mut recv_channel).await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: Some(DynamicTarget::Udp(target.clone())),
+        },
+        &mut send_channel,
+        &mut recv_channel,
+    )
+    .await?;
 
     // Forward SOCKS-side datagrams onto the QUIC stream until the rx side
     // closes (relay loop dropped the conn) or the conn sits idle long

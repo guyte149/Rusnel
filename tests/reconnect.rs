@@ -80,19 +80,7 @@ async fn spawn_server(server_port: u16) -> ServerHandle {
                             Ok(c) => c,
                             Err(e) => { info!("incoming failed: {e}"); return; }
                         };
-                        // Run the same per-connection accept loop the real
-                        // server uses by handing each bi-stream off to the
-                        // public tunnel handler. We only need the data plane
-                        // to work end-to-end; using the library's own server
-                        // mod would require exposing more internals.
-                        loop {
-                            let stream = conn.accept_bi().await;
-                            let (send, recv) = match stream {
-                                Ok(s) => s,
-                                Err(_) => return,
-                            };
-                            tokio::spawn(handle_test_stream(conn.clone(), send, recv));
-                        }
+                        run_test_session(conn).await;
                     });
                 }
             }
@@ -109,25 +97,99 @@ async fn spawn_server(server_port: u16) -> ServerHandle {
     }
 }
 
-/// Minimal server-side stream handler that re-implements the forward-TCP path
-/// from `server::handle_remote_stream`. Using only public APIs keeps this test
-/// independent of internal layout changes.
-async fn handle_test_stream(
-    _conn: Connection,
-    mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
-) {
+/// Minimal server stub used to exercise the client's reconnect logic.
+///
+/// Implements just enough of the v0.8 wire protocol — one
+/// [`SessionHello`] on the first bi-stream, then [`OpenConn`] on every
+/// subsequent one — to drive a forward TCP tunnel. Each accepted QUIC
+/// connection is processed by [`run_test_session`].
+async fn run_test_session(connection: Connection) {
+    use rusnel::common::remote::{
+        Direction, OpenConnResponse, RemoteKind, RemoteRequest, SessionHelloResponse,
+    };
     use rusnel::common::tcp::tunnel_tcp_server;
-    use rusnel::common::tunnel::server_receive_remote_request;
-    let request = match server_receive_remote_request(&mut send, &mut recv, false, false).await {
-        Ok(r) => r,
+    use rusnel::common::tunnel::{
+        receive_open_conn, reply_open_conn, server_receive_session_hello,
+        server_reply_session_hello,
+    };
+
+    // Session hello: read declarations, allocate fake tunnel ids, and
+    // remember each forward TCP target so OpenConn frames can be
+    // dispatched without re-parsing the original spec.
+    let (mut hello_send, mut hello_recv) = match connection.accept_bi().await {
+        Ok(s) => s,
         Err(e) => {
-            info!("control handshake failed: {e}");
+            info!("hello accept failed: {e}");
             return;
         }
     };
-    if let Err(e) = tunnel_tcp_server(recv, send, request, None).await {
-        info!("tunnel ended: {e}");
+    let hello = match server_receive_session_hello(&mut hello_recv).await {
+        Ok(h) => h,
+        Err(e) => {
+            info!("hello read failed: {e}");
+            return;
+        }
+    };
+    let mut tunnels: std::collections::HashMap<u64, RemoteRequest> =
+        std::collections::HashMap::new();
+    let mut tunnel_ids: Vec<u64> = Vec::with_capacity(hello.remotes.len());
+    for (i, r) in hello.remotes.iter().enumerate() {
+        let id = (i as u64) + 1;
+        tunnel_ids.push(id);
+        tunnels.insert(id, r.clone());
+    }
+    if let Err(e) =
+        server_reply_session_hello(&mut hello_send, &SessionHelloResponse::Ok { tunnel_ids }).await
+    {
+        info!("hello reply failed: {e}");
+        return;
+    }
+
+    // Per-conn loop.
+    loop {
+        let stream = match connection.accept_bi().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let tunnels = tunnels.clone();
+        tokio::spawn(async move {
+            let (mut send, mut recv) = stream;
+            let open = match receive_open_conn(&mut recv).await {
+                Ok(o) => o,
+                Err(e) => {
+                    info!("open_conn read failed: {e}");
+                    return;
+                }
+            };
+            let parent = match tunnels.get(&open.tunnel_id) {
+                Some(p) => p.clone(),
+                None => {
+                    let _ = reply_open_conn(
+                        &mut send,
+                        &OpenConnResponse::Failed("unknown tunnel".into()),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if reply_open_conn(&mut send, &OpenConnResponse::Ok)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            // Only forward TCP is exercised by this test stub.
+            let req = match parent.kind {
+                RemoteKind::Tcp { local, remote } => RemoteRequest {
+                    direction: Direction::Forward,
+                    kind: RemoteKind::Tcp { local, remote },
+                },
+                _ => return,
+            };
+            if let Err(e) = tunnel_tcp_server(recv, send, req, None).await {
+                info!("tunnel ended: {e}");
+            }
+        });
     }
 }
 

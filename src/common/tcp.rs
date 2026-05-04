@@ -10,7 +10,8 @@ use tokio::{
 use tracing::{debug, debug_span, info, Instrument};
 
 use crate::common::counted::{CountedReader, TunnelCounters};
-use crate::common::tunnel::client_send_remote_request;
+use crate::common::remote::OpenConn;
+use crate::common::tunnel::send_open_conn;
 use crate::server::state::TunnelHandle;
 
 use super::remote::RemoteRequest;
@@ -128,6 +129,7 @@ pub async fn tunnel_tcp_client(
     quic_connection: Connection,
     remote: RemoteRequest,
     handle: TunnelHandleOpt,
+    tunnel_id: u64,
 ) -> Result<()> {
     // Use SocketAddr's Display so IPv6 literals come out bracketed
     // (`[::1]:8080`) — a manual `format!("{ip}:{port}")` on an IPv6
@@ -144,20 +146,34 @@ pub async fn tunnel_tcp_client(
         let span = debug_span!("conn", id = conn_id, peer = %addr);
 
         let connection = quic_connection.clone();
-        let remote = remote.clone();
         let handle = handle.clone();
         tokio::spawn(
             async move {
                 debug!("open");
                 let (mut send, mut recv) = connection.open_bi().await?;
 
-                client_send_remote_request(&remote, &mut send, &mut recv).await?;
+                // Tell the peer which tunnel this stream belongs to.
+                // Static TCP tunnels carry no `dynamic` payload — the
+                // peer already knows the target from the tunnel's
+                // declaration in the session hello.
+                send_open_conn(
+                    &OpenConn {
+                        tunnel_id,
+                        dynamic: None,
+                    },
+                    &mut send,
+                    &mut recv,
+                )
+                .await?;
 
                 // Register this accepted connection as a conn against
                 // the parent tunnel (when admin tracking is enabled).
                 // The `ConnGuard` removes it again on drop, regardless
                 // of how the stream below ends.
                 let _conn_guard = handle.as_ref().map(|h| h.open_conn(Some(addr.to_string())));
+                if let Some(g) = _conn_guard.as_ref() {
+                    info!(conn_id = g.id(), peer = %addr, "conn opened");
+                }
                 let counters = _conn_guard.as_ref().map(|g| g.counters());
 
                 tunnel_tcp_stream(local_socket, send, recv, counters).await?;

@@ -20,7 +20,8 @@
 //!
 //! Lifecycle hooks (driven from [`super`]):
 //! * client connect → [`ServerState::register_client`]
-//! * control-plane handshake → [`ServerState::find_or_create_tunnel`]
+//! * session hello → [`ServerState::register_tunnels`] pre-allocates one
+//!   [`TunnelEntry`] per declared remote in a single batch
 //! * data-plane stream / accepted-conn → [`ServerState::register_conn`]
 //!   (dropped via [`ConnGuard`])
 //! * client disconnect → [`ServerState::deregister_client`] which fans
@@ -60,17 +61,13 @@ pub struct ClientEntry {
     pub id: u64,
     pub remote: SocketAddr,
     pub connected_at: SystemTime,
-    /// Tunnels currently registered against this client. Deduped by
-    /// the spec string, so reconnects of the same forward tunnel share
-    /// an entry. Held as `Arc`s so the admin routes can grab a snapshot
-    /// without holding the shard lock across JSON serialization.
+    /// Tunnels registered against this client by the session hello.
+    /// Pre-allocated once, in a single [`ServerState::register_tunnels`]
+    /// call, so deduplication is unnecessary — each `--remote` flag on
+    /// the client CLI maps to exactly one entry. Held as `Arc`s so the
+    /// admin routes can grab a snapshot without holding the shard lock
+    /// across JSON serialization.
     pub tunnels: DashMap<u64, Arc<TunnelEntry>>,
-    /// Auxiliary index `spec → tunnel_id` so [`ServerState::find_or_create_tunnel`]
-    /// can dedupe atomically via `DashMap::entry`. Without this, two
-    /// concurrent first-conns on the same forward TCP remote both
-    /// observe an empty `tunnels` map and each create a separate
-    /// tunnel entry.
-    tunnel_index: DashMap<String, u64>,
     /// Live QUIC handle. Kept around for phase-2 write endpoints
     /// (`DELETE /clients/:id` → `connection.close(...)`); no read path
     /// dereferences it today.
@@ -265,7 +262,6 @@ impl ServerState {
             remote,
             connected_at: SystemTime::now(),
             tunnels: DashMap::new(),
-            tunnel_index: DashMap::new(),
             conn,
         });
         self.inner.clients.insert(id, entry.clone());
@@ -313,39 +309,27 @@ impl ServerState {
 
     // -- tunnels ------------------------------------------------------------
 
-    /// Register a tunnel for `client` keyed by `request`'s spec string,
-    /// or return the existing entry if the client already declared a
-    /// matching one. This is what lets the same forward TCP remote
-    /// share a tunnel across many conns.
-    pub fn find_or_create_tunnel(
+    /// Bulk-register every tunnel declared in the client's session
+    /// hello, returning the freshly minted entries in the same order
+    /// as `requests`. Allocates a fresh `tunnel_id` per declaration —
+    /// duplicate specs in a single hello produce two separate
+    /// tunnels (the wire protocol no longer needs dedup, since
+    /// forward conns no longer re-send a `RemoteRequest` per stream).
+    pub fn register_tunnels(
         &self,
         client: &ClientEntry,
-        request: &RemoteRequest,
-    ) -> Arc<TunnelEntry> {
-        let spec = request.to_string();
-        // The DashMap entry API holds the shard lock for `spec`, so
-        // two concurrent first-conns on the same forward remote
-        // serialize through here and only one creates a tunnel.
-        match client.tunnel_index.entry(spec.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(o) => {
-                let tunnel_id = *o.get();
-                if let Some(t) = client.tunnels.get(&tunnel_id) {
-                    return t.value().clone();
-                }
-                // Index pointed at a tunnel that has since been
-                // removed (shouldn't happen while the client is alive,
-                // but treat it as a recreate). Fall through after
-                // dropping the stale index entry.
-                drop(o);
-            }
-            dashmap::mapref::entry::Entry::Vacant(v) => {
+        requests: &[RemoteRequest],
+    ) -> Vec<Arc<TunnelEntry>> {
+        requests
+            .iter()
+            .map(|req| {
                 let id = self.inner.next_tunnel_id.fetch_add(1, Ordering::Relaxed) + 1;
                 let entry = Arc::new(TunnelEntry {
                     id,
                     client_id: client.id,
-                    direction: request.direction,
-                    kind: request.kind.clone(),
-                    spec,
+                    direction: req.direction,
+                    kind: req.kind.clone(),
+                    spec: req.to_string(),
                     opened_at: SystemTime::now(),
                     conns: DashMap::new(),
                     cumulative_in: AtomicU64::new(0),
@@ -354,29 +338,9 @@ impl ServerState {
                 });
                 client.tunnels.insert(id, entry.clone());
                 self.inner.tunnels.insert(id, entry.clone());
-                v.insert(id);
-                return entry;
-            }
-        }
-        // Stale-index recovery path: fall back to the un-deduped
-        // create. Exceedingly rare so we don't bother optimising it.
-        let id = self.inner.next_tunnel_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let entry = Arc::new(TunnelEntry {
-            id,
-            client_id: client.id,
-            direction: request.direction,
-            kind: request.kind.clone(),
-            spec: request.to_string(),
-            opened_at: SystemTime::now(),
-            conns: DashMap::new(),
-            cumulative_in: AtomicU64::new(0),
-            cumulative_out: AtomicU64::new(0),
-            total_conns: AtomicU64::new(0),
-        });
-        client.tunnels.insert(id, entry.clone());
-        self.inner.tunnels.insert(id, entry.clone());
-        client.tunnel_index.insert(request.to_string(), id);
-        entry
+                entry
+            })
+            .collect()
     }
 
     pub fn tunnel(&self, id: u64) -> Option<Arc<TunnelEntry>> {
@@ -477,6 +441,10 @@ impl ConnGuard {
     /// The shared atomics the data-plane handler should bump.
     pub fn counters(&self) -> Arc<TunnelCounters> {
         self.conn.counters.clone()
+    }
+
+    pub fn id(&self) -> u64 {
+        self.conn.id
     }
 }
 

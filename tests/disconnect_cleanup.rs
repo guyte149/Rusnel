@@ -16,10 +16,9 @@ use std::time::Duration;
 use common::{get_available_port, init_crypto, server_config, STARTUP_DELAY};
 use quinn::VarInt;
 use rusnel::common::quic::{create_client_endpoint, Congestion};
-use rusnel::common::remote::RemoteRequest;
+use rusnel::common::remote::{RemoteRequest, SessionHello};
 use rusnel::common::tls::ClientTlsConfig;
-use rusnel::common::tunnel::client_send_remote_request;
-use tokio::io::AsyncWriteExt;
+use rusnel::common::tunnel::client_send_session_hello;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 
@@ -96,11 +95,18 @@ async fn test_server_releases_reverse_listener_on_client_disconnect() {
             "R:127.0.0.1:{reverse_listen_port}:127.0.0.1:{reverse_target_port}"
         ))
         .unwrap();
+        // Send a session hello carrying just this one reverse remote.
+        // The post-0.8 wire protocol no longer accepts a per-stream
+        // `RemoteRequest`; tunnels are declared up front and the
+        // server spawns the reverse listener on receipt of the
+        // hello reply.
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        client_send_remote_request(&remote, &mut send, &mut recv)
+        let hello = SessionHello {
+            remotes: vec![remote],
+        };
+        let _ = client_send_session_hello(&hello, &mut send, &mut recv)
             .await
             .unwrap();
-        send.shutdown().await.unwrap();
 
         let bound = wait_until(Duration::from_secs(10), || async {
             !port_is_free(reverse_listen_port).await

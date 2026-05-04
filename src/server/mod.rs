@@ -14,14 +14,18 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::common::quic::create_server_endpoint;
-use crate::common::remote::{Direction, RemoteKind};
+use crate::common::remote::{
+    Direction, DynamicTarget, RemoteKind, RemoteRequest, SessionHelloResponse,
+};
 use crate::common::socks::tunnel_socks_client;
 use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
-use crate::common::tunnel::server_receive_remote_request;
+use crate::common::tunnel::{
+    reply_open_conn, server_receive_session_hello, server_reply_session_hello,
+};
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::ServerConfig;
 
-use self::state::{ServerState, TunnelHandle};
+use self::state::{ServerState, TunnelEntry, TunnelHandle};
 
 /// Application-level QUIC close codes the server uses. We pick chisel-ish
 /// values purely so the wire dumps from the two tools look similar; the QUIC
@@ -173,6 +177,53 @@ async fn handle_client_connection(
     let client_entry =
         state.register_client(client_id, connection.remote_address(), connection.clone());
 
+    // ---------------------------------------------------------------
+    // Session hello: the very first bi-stream the client opens carries
+    // its full set of tunnel declarations. Validate them as a batch and
+    // either accept the whole session (assigning `tunnel_id`s) or reject
+    // it. This replaces the legacy per-stream `RemoteRequest` handshake.
+    // ---------------------------------------------------------------
+    let hello_outcome = perform_session_hello(
+        &connection,
+        &state,
+        &client_entry,
+        allow_reverse,
+        allow_socks,
+    )
+    .await;
+    let registered_tunnels = match hello_outcome {
+        Ok(t) => t,
+        Err(e) => {
+            // Rejected sessions still count as a disconnect so they
+            // appear in /history. The QUIC connection itself is left
+            // for the client to close once it sees the failure reply.
+            error!("session hello rejected: {e}");
+            state.deregister_client(client_id, format!("hello rejected: {e}"));
+            return Err(e);
+        }
+    };
+
+    // Reverse handlers own long-lived local sockets — bind them as
+    // soon as the hello is accepted, before any conn flows. Forward
+    // tunnels are passive on the server side; their conns arrive as
+    // OpenConn frames on the per-conn loop below.
+    for tunnel in &registered_tunnels {
+        info!(
+            tunnel_id = tunnel.id,
+            spec = %tunnel.spec,
+            direction = ?tunnel.direction,
+            "tunnel registered"
+        );
+        if matches!(tunnel.direction, Direction::Reverse) {
+            spawn_reverse_handler(
+                connection.clone(),
+                state.clone(),
+                tunnel.clone(),
+                &mut tunnels,
+            );
+        }
+    }
+
     let outcome = loop {
         let quic_connection = connection.clone();
 
@@ -222,19 +273,11 @@ async fn handle_client_connection(
             Ok(s) => s,
         };
 
-        let state_for_tunnel = state.clone();
-        let client_for_tunnel = client_entry.clone();
-        let fut = handle_remote_stream(
-            quic_connection,
-            stream,
-            allow_reverse,
-            allow_socks,
-            state_for_tunnel,
-            client_for_tunnel,
-        );
+        let state_for_conn = state.clone();
+        let fut = handle_open_conn(stream, state_for_conn);
         tunnels.spawn(async move {
             if let Err(e) = fut.await {
-                error!("failed: {}", e);
+                error!("conn failed: {}", e);
             }
         });
     };
@@ -257,75 +300,218 @@ async fn handle_client_connection(
     outcome
 }
 
-async fn handle_remote_stream(
-    quic_connection: Connection,
-    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+/// Read the client's [`SessionHello`], validate every requested
+/// remote, and reply with the assigned `tunnel_id`s (or a failure).
+/// On success returns the freshly registered tunnel entries in the
+/// same order as `hello.remotes`.
+async fn perform_session_hello(
+    connection: &Connection,
+    state: &ServerState,
+    client: &Arc<state::ClientEntry>,
     allow_reverse: bool,
     allow_socks: bool,
+) -> Result<Vec<Arc<TunnelEntry>>> {
+    let (mut send, mut recv) = connection.accept_bi().await?;
+    let hello = server_receive_session_hello(&mut recv).await?;
+
+    if let Err(reason) = validate_remotes(&hello.remotes, allow_reverse, allow_socks) {
+        let resp = SessionHelloResponse::Failed(reason.clone());
+        let _ = server_reply_session_hello(&mut send, &resp).await;
+        return Err(anyhow::anyhow!(reason));
+    }
+
+    let tunnels = state.register_tunnels(client, &hello.remotes);
+    let tunnel_ids: Vec<u64> = tunnels.iter().map(|t| t.id).collect();
+    server_reply_session_hello(&mut send, &SessionHelloResponse::Ok { tunnel_ids }).await?;
+    Ok(tunnels)
+}
+
+/// Static validation of a hello batch against the server's policy.
+/// Returns the *first* offending reason — operators rarely care about
+/// the rest, and surfacing only one keeps the rejection log tidy.
+fn validate_remotes(
+    remotes: &[RemoteRequest],
+    allow_reverse: bool,
+    allow_socks: bool,
+) -> Result<(), String> {
+    for r in remotes {
+        if r.is_reversed() && !allow_reverse {
+            return Err(format!("Reverse remotes are not allowed ({r})"));
+        }
+        if r.is_socks() && !allow_socks {
+            return Err(format!("SOCKS5 remotes are not allowed ({r})"));
+        }
+    }
+    Ok(())
+}
+
+fn spawn_reverse_handler(
+    connection: Connection,
     state: ServerState,
-    client: Arc<state::ClientEntry>,
-) -> Result<()> {
-    let request =
-        server_receive_remote_request(&mut send, &mut recv, allow_reverse, allow_socks).await?;
-    let remote_display = request.to_string();
-
-    // Find-or-create the *tunnel* (the remote declaration) for this
-    // client. Multiple conns on the same forward TCP remote share
-    // a single tunnel entry; reverse tunnels show up here exactly once
-    // because the client only sends the control-plane handshake once.
-    let tunnel = state.find_or_create_tunnel(&client, &request);
-
-    async {
-        info!("tunnel established");
-
-        // Dispatch is a flat `(direction, kind)` match — the wire type
-        // is unambiguous, no string sentinels, no `_` placeholders.
-        // SOCKS5 forward is a configuration error (the tunnel target is
-        // decided by the *client's* per-connection handshake, so the
-        // server never owns a SOCKS listener) and we reject it
-        // explicitly.
-        //
-        // Sessions are registered differently per direction:
-        // * forward: the bi-stream IS the conn, so we open a
-        //   `ConnGuard` here and pass its counters to the data-plane
-        //   handler.
-        // * reverse: the bi-stream is the control-plane handshake; the
-        //   handler opens a long-lived listener and registers one
-        //   conn per accepted connection. We hand it a
-        //   [`TunnelHandle`] so it can do that without seeing
-        //   `ServerState`.
-        match (request.direction, &request.kind) {
-            (Direction::Forward, RemoteKind::Tcp { .. }) => {
-                let _conn = state.register_conn(&tunnel, None);
-                let counters = Some(_conn.counters());
-                tunnel_tcp_server(recv, send, request, counters).await?
-            }
-            (Direction::Reverse, RemoteKind::Tcp { .. }) => {
-                let handle = Some(Arc::new(TunnelHandle::new(state.clone(), tunnel.clone())));
-                tunnel_tcp_client(quic_connection, request, handle).await?
-            }
-            (Direction::Forward, RemoteKind::Udp { .. }) => {
-                let _conn = state.register_conn(&tunnel, None);
-                let counters = Some(_conn.counters());
-                tunnel_udp_server(recv, send, request, counters).await?
-            }
-            (Direction::Reverse, RemoteKind::Udp { .. }) => {
-                let handle = Some(Arc::new(TunnelHandle::new(state.clone(), tunnel.clone())));
-                tunnel_udp_client(quic_connection, request, handle).await?
-            }
-            (Direction::Reverse, RemoteKind::Socks5 { .. }) => {
-                let handle = Some(Arc::new(TunnelHandle::new(state.clone(), tunnel.clone())));
-                tunnel_socks_client(quic_connection, request, handle).await?
-            }
-            (Direction::Forward, RemoteKind::Socks5 { .. }) => {
-                return Err(anyhow::anyhow!(
-                    "forward SOCKS5 is a client-side concern; server should not have received this request"
-                ));
+    tunnel: Arc<TunnelEntry>,
+    tasks: &mut JoinSet<()>,
+) {
+    let handle = Arc::new(TunnelHandle::new(state, tunnel.clone()));
+    let span = info_span!(
+        "reverse",
+        tunnel_id = tunnel.id,
+        spec = %tunnel.spec,
+    );
+    tasks.spawn(
+        async move {
+            // Reconstruct the `RemoteRequest` from the stored tunnel
+            // declaration so the existing handlers (which still take a
+            // `RemoteRequest` for local-bind / target lookup) keep
+            // working unchanged.
+            let request = RemoteRequest {
+                direction: tunnel.direction,
+                kind: tunnel.kind.clone(),
+            };
+            let result = match &tunnel.kind {
+                RemoteKind::Tcp { .. } => {
+                    tunnel_tcp_client(connection, request, Some(handle), tunnel.id).await
+                }
+                RemoteKind::Udp { .. } => {
+                    tunnel_udp_client(connection, request, Some(handle), tunnel.id).await
+                }
+                RemoteKind::Socks5 { .. } => {
+                    tunnel_socks_client(connection, request, Some(handle), tunnel.id).await
+                }
+            };
+            if let Err(e) = result {
+                error!("reverse handler failed: {e}");
             }
         }
+        .instrument(span),
+    );
+}
 
-        Ok(())
+/// Per-conn dispatcher. Receives one [`OpenConn`] frame, looks up its
+/// parent tunnel, registers a `ConnGuard`, and hands the bi-stream off
+/// to the appropriate data-plane handler.
+async fn handle_open_conn(
+    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+    state: ServerState,
+) -> Result<()> {
+    use crate::common::remote::OpenConnResponse;
+    let open = crate::common::tunnel::receive_open_conn(&mut recv).await?;
+
+    let tunnel = match state.tunnel(open.tunnel_id) {
+        Some(t) => t,
+        None => {
+            let _ = reply_open_conn(
+                &mut send,
+                &OpenConnResponse::Failed(format!("unknown tunnel id {}", open.tunnel_id)),
+            )
+            .await;
+            return Err(anyhow::anyhow!("unknown tunnel id {}", open.tunnel_id));
+        }
+    };
+
+    // Resolve the per-conn target. Static tunnels carry it in
+    // `tunnel.kind`; SOCKS5 dynamic streams carry it in `open.dynamic`
+    // (per CONNECT or per UDP target the SOCKS handler just decoded).
+    let dispatch = match resolve_dispatch(&tunnel, open.dynamic.as_ref()) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = reply_open_conn(&mut send, &OpenConnResponse::Failed(e.to_string())).await;
+            return Err(e);
+        }
+    };
+
+    reply_open_conn(&mut send, &OpenConnResponse::Ok).await?;
+
+    let peer = dispatch.peer_label();
+    let _conn = state.register_conn(&tunnel, peer.clone());
+    info!(
+        conn_id = _conn.id(),
+        tunnel_id = tunnel.id,
+        peer = peer.as_deref().unwrap_or("-"),
+        "conn opened"
+    );
+    let counters = Some(_conn.counters());
+
+    async {
+        match dispatch {
+            ForwardDispatch::Tcp(req) => tunnel_tcp_server(recv, send, req, counters).await,
+            ForwardDispatch::Udp(req) => tunnel_udp_server(recv, send, req, counters).await,
+        }
     }
-    .instrument(info_span!("tunnel", remote = %remote_display))
+    .instrument(info_span!(
+        "conn",
+        tunnel_id = tunnel.id,
+        spec = %tunnel.spec,
+    ))
     .await
+}
+
+/// What the conn's data-plane handler will do, plus the synthetic
+/// `RemoteRequest` it expects (carrying `local`/`remote` already
+/// resolved). Reverse tunnels never end up here — they reach the
+/// data plane via [`spawn_reverse_handler`].
+enum ForwardDispatch {
+    Tcp(RemoteRequest),
+    Udp(RemoteRequest),
+}
+
+impl ForwardDispatch {
+    fn peer_label(&self) -> Option<String> {
+        match self {
+            ForwardDispatch::Tcp(r) | ForwardDispatch::Udp(r) => r.remote_addr_string(),
+        }
+    }
+}
+
+fn resolve_dispatch(
+    tunnel: &TunnelEntry,
+    dynamic: Option<&DynamicTarget>,
+) -> Result<ForwardDispatch> {
+    if !matches!(tunnel.direction, Direction::Forward) {
+        return Err(anyhow::anyhow!(
+            "OpenConn on reverse tunnel {} (server pushes reverse conns, not the client)",
+            tunnel.id
+        ));
+    }
+    match (&tunnel.kind, dynamic) {
+        (RemoteKind::Tcp { local, remote }, None) => Ok(ForwardDispatch::Tcp(RemoteRequest {
+            direction: Direction::Forward,
+            kind: RemoteKind::Tcp {
+                local: *local,
+                remote: remote.clone(),
+            },
+        })),
+        (RemoteKind::Udp { local, remote }, None) => Ok(ForwardDispatch::Udp(RemoteRequest {
+            direction: Direction::Forward,
+            kind: RemoteKind::Udp {
+                local: *local,
+                remote: remote.clone(),
+            },
+        })),
+        (RemoteKind::Socks5 { local }, Some(DynamicTarget::Tcp(target))) => {
+            Ok(ForwardDispatch::Tcp(RemoteRequest {
+                direction: Direction::Forward,
+                kind: RemoteKind::Tcp {
+                    local: *local,
+                    remote: target.clone(),
+                },
+            }))
+        }
+        (RemoteKind::Socks5 { local }, Some(DynamicTarget::Udp(target))) => {
+            Ok(ForwardDispatch::Udp(RemoteRequest {
+                direction: Direction::Forward,
+                kind: RemoteKind::Udp {
+                    local: *local,
+                    remote: target.clone(),
+                },
+            }))
+        }
+        (RemoteKind::Socks5 { .. }, None) => Err(anyhow::anyhow!(
+            "OpenConn on SOCKS5 tunnel {} requires a `dynamic` target",
+            tunnel.id
+        )),
+        (_, Some(_)) => Err(anyhow::anyhow!(
+            "OpenConn on tunnel {} carried unexpected dynamic target",
+            tunnel.id
+        )),
+    }
 }

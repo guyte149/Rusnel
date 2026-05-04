@@ -86,43 +86,35 @@ impl RemoteKind {
     }
 }
 
-/// A single tunnel description. The wire payload is
-/// `(direction, kind, from_socks)` and dispatchers on either side consume it
-/// via `match` with no stringly-typed sentinels and no `_` placeholders.
+/// A single tunnel description (a *tunnel declaration*). One of these per
+/// `--remote` flag on the client CLI; sent to the server in bulk inside
+/// [`SessionHello`] right after the QUIC connection is established.
+///
+/// In the post-0.8 protocol the client never re-sends a `RemoteRequest`
+/// per data conn — once the server accepts the hello and assigns each
+/// declaration a `tunnel_id`, all subsequent bi-streams identify
+/// themselves with [`OpenConn`] frames keyed by that id.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRequest {
     pub direction: Direction,
     pub kind: RemoteKind,
-    /// `true` when this remote was manufactured by a SOCKS5 handler as a
-    /// per-target dynamic tunnel (forward `socks` → per-CONNECT TCP target;
-    /// forward `socks` UDP ASSOCIATE → per-target UDP). Lets the server gate
-    /// SOCKS-originated traffic via `--allow-socks` even though, by the time
-    /// the request reaches the wire, its `kind` is a plain `Tcp` / `Udp`
-    /// pointing at whatever target the SOCKS client asked for.
-    ///
-    /// For static remotes (anything declared on the CLI) and for reverse
-    /// SOCKS5 listeners (which use `RemoteKind::Socks5` directly) this field
-    /// stays `false` — `is_socks()` already returns `true` for the latter
-    /// based on `kind`.
-    #[serde(default)]
-    pub from_socks: bool,
 }
 
 impl RemoteRequest {
     pub fn new(direction: Direction, kind: RemoteKind) -> Self {
-        Self {
-            direction,
-            kind,
-            from_socks: false,
-        }
+        Self { direction, kind }
     }
 
-    /// `true` if this remote represents SOCKS5 traffic — either a standalone
-    /// SOCKS5 listener (reverse `R:socks`) or a dynamic per-target stream
-    /// manufactured inside a forward SOCKS5 handler. The server uses this to
-    /// gate everything SOCKS-related behind a single `--allow-socks` flag.
+    /// `true` if this remote represents SOCKS5 traffic — a standalone
+    /// SOCKS5 listener declaration (`R:socks` for reverse, plain `socks`
+    /// for forward). Used by the server's hello-time validation to gate
+    /// SOCKS5 behind `--allow-socks`. Per-CONNECT / per-UDP-target
+    /// dynamic streams the SOCKS handler manufactures at runtime no
+    /// longer need their own flag — they are carried as
+    /// [`OpenConn::dynamic`] under a parent SOCKS5 tunnel, which was
+    /// already gated at hello time.
     pub fn is_socks(&self) -> bool {
-        self.from_socks || matches!(self.kind, RemoteKind::Socks5 { .. })
+        matches!(self.kind, RemoteKind::Socks5 { .. })
     }
 
     pub fn is_reversed(&self) -> bool {
@@ -145,39 +137,6 @@ impl RemoteRequest {
                 Some(remote.to_addr_string())
             }
             RemoteKind::Socks5 { .. } => None,
-        }
-    }
-
-    /// Build a TCP forward remote that reuses this remote's `local` and
-    /// `direction`. Used by the SOCKS handshake to manufacture a dynamic
-    /// per-connection remote whose target is whatever the SOCKS client
-    /// asked for.
-    pub fn dynamic_tcp(&self, target: HostPort) -> Self {
-        Self {
-            direction: self.direction,
-            kind: RemoteKind::Tcp {
-                local: self.kind.local(),
-                remote: target,
-            },
-            // Tag this as SOCKS-originated so the server's `--allow-socks`
-            // gate fires even though the wire-level `kind` looks like a
-            // plain TCP forward.
-            from_socks: true,
-        }
-    }
-
-    /// UDP variant of [`Self::dynamic_tcp`]: build a UDP forward remote that
-    /// reuses this remote's `local` and `direction`. Used by SOCKS5
-    /// `UDP ASSOCIATE` to manufacture a per-target dynamic remote whose
-    /// target is whatever the SOCKS UDP datagram header pointed at.
-    pub fn dynamic_udp(&self, target: HostPort) -> Self {
-        Self {
-            direction: self.direction,
-            kind: RemoteKind::Udp {
-                local: self.kind.local(),
-                remote: target,
-            },
-            from_socks: true,
         }
     }
 }
@@ -210,13 +169,70 @@ impl fmt::Display for RemoteRequest {
 
 impl SerdeHelper for RemoteRequest {}
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum RemoteResponse {
-    RemoteOk,
-    RemoteFailed(String),
+// ---------------------------------------------------------------------------
+// Session-level handshake (post-0.8 wire protocol)
+// ---------------------------------------------------------------------------
+//
+// Right after the QUIC connection is established the client opens its
+// first bi-stream and sends a [`SessionHello`] carrying *every* tunnel
+// declaration it wants. The server validates them all in one shot
+// against `--allow-reverse` / `--allow-socks` and either accepts the
+// whole batch — assigning one `tunnel_id` per declaration in the same
+// order — or rejects the entire session. Subsequent bi-streams (in
+// either direction) start with an [`OpenConn`] frame that names the
+// `tunnel_id` they belong to, so neither side ever re-sends a full
+// [`RemoteRequest`] on the data plane.
+
+/// First control frame the client sends on a fresh QUIC connection.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SessionHello {
+    pub remotes: Vec<RemoteRequest>,
 }
 
-impl SerdeHelper for RemoteResponse {}
+impl SerdeHelper for SessionHello {}
+
+/// Server's reply to [`SessionHello`]. On success, `tunnel_ids[i]` is
+/// the server-assigned id for `hello.remotes[i]`. On failure, the
+/// server closes the connection.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SessionHelloResponse {
+    Ok { tunnel_ids: Vec<u64> },
+    Failed(String),
+}
+
+impl SerdeHelper for SessionHelloResponse {}
+
+/// Per-conn opener. Sent on the first 4 + body bytes of every
+/// data-plane bi-stream (in either direction) so the receiving side
+/// knows which tunnel this conn belongs to without consulting any
+/// out-of-band state.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OpenConn {
+    pub tunnel_id: u64,
+    /// SOCKS5-only: the per-CONNECT (TCP) or per-target (UDP) address
+    /// the SOCKS handshake just resolved. `None` for static tunnels
+    /// (the receiving side uses the parent tunnel's declared `kind`).
+    pub dynamic: Option<DynamicTarget>,
+}
+
+impl SerdeHelper for OpenConn {}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum DynamicTarget {
+    Tcp(HostPort),
+    Udp(HostPort),
+}
+
+/// Reply to an [`OpenConn`]. `Ok` = "go ahead, start streaming"; `Failed`
+/// surfaces a server-side reason (unknown tunnel id, dispatch error,
+/// …) so the conn can be torn down cleanly instead of timing out.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum OpenConnResponse {
+    Ok,
+    Failed(String),
+}
+
+impl SerdeHelper for OpenConnResponse {}
 
 // ---------------------------------------------------------------------------
 // Parser
@@ -250,11 +266,7 @@ impl FromStr for RemoteRequest {
         let (protocol_hint, body) = parse_protocol(after_dir)?;
         let tokens = split_addr_tokens(body)?;
         let kind = tokens_to_kind(&tokens, protocol_hint)?;
-        Ok(RemoteRequest {
-            direction,
-            kind,
-            from_socks: false,
-        })
+        Ok(RemoteRequest { direction, kind })
     }
 }
 
@@ -716,15 +728,6 @@ mod tests {
     fn local_socket_addr_handles_ipv6() {
         let r = parse("[::1]:8080:example.com:80");
         assert_eq!(r.local_socket_addr().to_string(), "[::1]:8080");
-    }
-
-    #[test]
-    fn dynamic_tcp_inherits_local_and_direction() {
-        let parent = parse("R:5000:socks");
-        let dyn_remote = parent.dynamic_tcp(HostPort::new("upstream.example", 80));
-        assert!(dyn_remote.is_reversed());
-        assert!(matches!(dyn_remote.kind, RemoteKind::Tcp { .. }));
-        assert_eq!(dyn_remote.local_socket_addr(), parent.local_socket_addr());
     }
 
     #[test]

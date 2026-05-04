@@ -10,8 +10,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::common::remote::OpenConn;
 use crate::common::tcp::{Counters, TunnelHandleOpt};
-use crate::common::tunnel::client_send_remote_request;
+use crate::common::tunnel::send_open_conn;
 
 use super::remote::RemoteRequest;
 
@@ -151,6 +152,7 @@ pub async fn tunnel_udp_client(
     quic_connection: Connection,
     remote: RemoteRequest,
     handle: TunnelHandleOpt,
+    tunnel_id: u64,
 ) -> Result<()> {
     let listen_addr = remote.local_socket_addr();
     let udp_socket = Arc::new(UdpSocket::bind(listen_addr).await?);
@@ -195,12 +197,12 @@ pub async fn tunnel_udp_client(
                 conns.insert(src, tx.clone());
                 spawn_udp_conn(
                     quic_connection.clone(),
-                    remote.clone(),
                     udp_socket.clone(),
                     src,
                     rx,
                     conns.clone(),
                     handle.clone(),
+                    tunnel_id,
                 );
                 tx
             }
@@ -217,12 +219,12 @@ pub async fn tunnel_udp_client(
 #[allow(clippy::too_many_arguments)]
 fn spawn_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     rx: mpsc::Receiver<Bytes>,
     conns: Arc<DashMap<SocketAddr, mpsc::Sender<Bytes>>>,
     handle: TunnelHandleOpt,
+    tunnel_id: u64,
 ) {
     tokio::spawn(async move {
         debug!(peer = %source, "opening UDP conn");
@@ -231,9 +233,12 @@ fn spawn_udp_conn(
         let _conn_guard = handle
             .as_ref()
             .map(|h| h.open_conn(Some(source.to_string())));
+        if let Some(g) = _conn_guard.as_ref() {
+            info!(conn_id = g.id(), peer = %source, "conn opened");
+        }
         let counters = _conn_guard.as_ref().map(|g| g.counters());
         if let Err(e) =
-            run_udp_conn(quic_connection, remote, udp_socket, source, rx, counters).await
+            run_udp_conn(quic_connection, tunnel_id, udp_socket, source, rx, counters).await
         {
             warn!(peer = %source, "UDP conn ended: {}", e);
         }
@@ -244,14 +249,22 @@ fn spawn_udp_conn(
 
 async fn run_udp_conn(
     quic_connection: Connection,
-    remote: RemoteRequest,
+    tunnel_id: u64,
     udp_socket: Arc<UdpSocket>,
     source: SocketAddr,
     mut rx: mpsc::Receiver<Bytes>,
     counters: Counters,
 ) -> Result<()> {
     let (mut send_channel, mut recv_channel) = quic_connection.open_bi().await?;
-    client_send_remote_request(&remote, &mut send_channel, &mut recv_channel).await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: None,
+        },
+        &mut send_channel,
+        &mut recv_channel,
+    )
+    .await?;
 
     // Forward locally-received datagrams onto the QUIC stream until the local
     // sender goes silent for CONN_IDLE_TIMEOUT.

@@ -2,21 +2,37 @@
 //!
 //! QUIC streams are byte-oriented, so any control message exchanged on a
 //! stream must carry its own framing. We use a tiny `u32` little-endian
-//! length prefix followed by a JSON body (kept as JSON for now to limit the
-//! blast radius of this change — see issue #21 for a binary codec).
+//! length prefix followed by a MessagePack body (see [`SerdeHelper`]).
+//!
+//! Two control flows live on top of this framing:
+//!
+//! * **Session hello.** The first bi-stream of every QUIC connection
+//!   carries one [`SessionHello`] (client → server) and one
+//!   [`SessionHelloResponse`] (server → client). The server uses the
+//!   hello to validate every requested remote against `--allow-reverse`
+//!   / `--allow-socks` in one shot, assigns each declaration a stable
+//!   `tunnel_id`, and either accepts the whole batch or rejects the
+//!   session entirely. There is no half-accept.
+//!
+//! * **Conn opener.** Every subsequent data-plane bi-stream (in either
+//!   direction) opens with one [`OpenConn`] frame keyed by a previously
+//!   negotiated `tunnel_id`. The receiving side replies with one
+//!   [`OpenConnResponse`] and, on `Ok`, the bi-stream is handed off to
+//!   the data-plane handler — no further control framing.
 
 use anyhow::{anyhow, Context, Result};
 use quinn::{RecvStream, SendStream};
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
-use crate::common::remote::RemoteResponse;
+use crate::common::remote::{OpenConn, OpenConnResponse, SessionHello, SessionHelloResponse};
 use crate::common::utils::SerdeHelper;
 
-use super::remote::RemoteRequest;
-
-/// Hard cap on a single control message body. Generous compared to anything
-/// the protocol actually sends today, but small enough that a malicious peer
-/// can't make us allocate gigabytes by lying about the length.
+/// Hard cap on a single control message body. Generous compared to
+/// anything the protocol actually sends today (the largest realistic
+/// payload is a [`SessionHello`] with a few dozen `RemoteRequest`s),
+/// but small enough that a malicious peer can't make us allocate
+/// gigabytes by lying about the length.
 const MAX_CONTROL_MSG: usize = 64 * 1024;
 
 async fn write_framed<T: SerdeHelper>(send: &mut SendStream, msg: &T) -> Result<()> {
@@ -45,53 +61,82 @@ async fn read_framed<T: SerdeHelper>(recv: &mut RecvStream) -> Result<T> {
     T::from_bytes(body)
 }
 
-pub async fn client_send_remote_request(
-    remote: &RemoteRequest,
-    send_channel: &mut SendStream,
-    recv_channel: &mut RecvStream,
-) -> Result<()> {
-    debug!("sending remote request");
-    write_framed(send_channel, remote).await?;
+// ---------------------------------------------------------------------------
+// Session-level hello
+// ---------------------------------------------------------------------------
 
-    let response: RemoteResponse = read_framed(recv_channel).await?;
-    match response {
-        RemoteResponse::RemoteFailed(err) => Err(anyhow!("Remote tunnel error: {}", err)),
-        RemoteResponse::RemoteOk => {
-            debug!("remote accepted");
-            Ok(())
+/// Client side of the hello: send the full tunnel-declaration batch
+/// and wait for the server's verdict. On success, returns the list of
+/// server-assigned `tunnel_id`s in the same order as `hello.remotes`.
+pub async fn client_send_session_hello(
+    hello: &SessionHello,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<Vec<u64>> {
+    debug!(remotes = hello.remotes.len(), "sending session hello");
+    write_framed(send, hello).await?;
+    send.shutdown().await?;
+    match read_framed::<SessionHelloResponse>(recv).await? {
+        SessionHelloResponse::Ok { tunnel_ids } => {
+            if tunnel_ids.len() != hello.remotes.len() {
+                return Err(anyhow!(
+                    "server returned {} tunnel ids for {} remotes",
+                    tunnel_ids.len(),
+                    hello.remotes.len()
+                ));
+            }
+            debug!(
+                "session accepted, {} tunnel(s) registered",
+                tunnel_ids.len()
+            );
+            Ok(tunnel_ids)
         }
+        SessionHelloResponse::Failed(reason) => Err(anyhow!("server rejected session: {reason}")),
     }
 }
 
-pub async fn server_receive_remote_request(
-    send_channel: &mut SendStream,
-    recv_channel: &mut RecvStream,
-    allow_reverse: bool,
-    allow_socks: bool,
-) -> Result<RemoteRequest> {
-    let request: RemoteRequest = read_framed(recv_channel).await?;
-    debug!("received remote request: {}", request);
+/// Server side of the hello: receive the batch. The caller is
+/// responsible for validating each remote (against `--allow-reverse` /
+/// `--allow-socks`), assigning ids, and replying with
+/// [`server_reply_session_hello`].
+pub async fn server_receive_session_hello(recv: &mut RecvStream) -> Result<SessionHello> {
+    let hello: SessionHello = read_framed(recv).await?;
+    debug!(remotes = hello.remotes.len(), "received session hello");
+    Ok(hello)
+}
 
-    if request.is_reversed() && !allow_reverse {
-        let response =
-            RemoteResponse::RemoteFailed(String::from("Reverse remotes are not allowed"));
-        write_framed(send_channel, &response).await?;
-        return Err(anyhow!("Reverse remotes are not allowed"));
+pub async fn server_reply_session_hello(
+    send: &mut SendStream,
+    response: &SessionHelloResponse,
+) -> Result<()> {
+    write_framed(send, response).await?;
+    send.shutdown().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Per-conn opener
+// ---------------------------------------------------------------------------
+
+/// Send an [`OpenConn`] on a freshly opened bi-stream and wait for the
+/// peer's verdict. On `Ok`, the stream is yours to use as a data-plane
+/// channel.
+pub async fn send_open_conn(
+    open: &OpenConn,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    write_framed(send, open).await?;
+    match read_framed::<OpenConnResponse>(recv).await? {
+        OpenConnResponse::Ok => Ok(()),
+        OpenConnResponse::Failed(reason) => Err(anyhow!("conn open rejected: {reason}")),
     }
+}
 
-    // Gates *all* SOCKS5 traffic — both reverse-SOCKS listener requests
-    // (`RemoteKind::Socks5`, used for `R:socks`) and forward-SOCKS dynamic
-    // per-target streams (`RemoteKind::Tcp` / `Udp` with `from_socks=true`,
-    // manufactured by the client's SOCKS5 handler on every CONNECT or
-    // UDP ASSOCIATE target). The combination means `R:socks` requires
-    // BOTH `--allow-reverse` (checked above) and `--allow-socks`, while
-    // forward `socks` requires just `--allow-socks`.
-    if request.is_socks() && !allow_socks {
-        let response = RemoteResponse::RemoteFailed(String::from("SOCKS5 remotes are not allowed"));
-        write_framed(send_channel, &response).await?;
-        return Err(anyhow!("SOCKS5 remotes are not allowed"));
-    }
+pub async fn receive_open_conn(recv: &mut RecvStream) -> Result<OpenConn> {
+    read_framed(recv).await
+}
 
-    write_framed(send_channel, &RemoteResponse::RemoteOk).await?;
-    Ok(request)
+pub async fn reply_open_conn(send: &mut SendStream, response: &OpenConnResponse) -> Result<()> {
+    write_framed(send, response).await
 }

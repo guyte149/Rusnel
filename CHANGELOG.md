@@ -5,6 +5,73 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-03
+
+Wire-protocol overhaul. The per-stream `RemoteRequest` handshake — and
+the `announce_only` band-aid added in 0.7.0 — are gone. Clients now
+declare the full set of tunnels in a single **session hello** right
+after QUIC connect, the server validates them in one shot, and every
+subsequent data-plane bi-stream identifies itself with a small
+**`OpenConn`** frame keyed by the server-assigned `tunnel_id`. This
+matches chisel's session-config model and fixes a real conceptual
+asymmetry: forward, reverse, and SOCKS dynamic streams now share a
+single declaration path.
+
+### Breaking
+
+- **Wire format is not backward compatible with 0.7.x.** A 0.8 client
+  speaking to a 0.7 server (or vice-versa) will fail at the first
+  handshake — there is no fallback. Upgrade both sides together.
+- **`RemoteRequest` lost its `announce_only` and `from_socks` fields**
+  along with the `dynamic_tcp` / `dynamic_udp` constructors.
+  Embedders that built `RemoteRequest`s by hand should drop those
+  fields; SOCKS-originated dynamic targets are now carried as
+  [`OpenConn::dynamic`] under a parent SOCKS5 tunnel, validated once
+  at hello time.
+- **Forward SOCKS5 with `--allow-socks=false` now fails the entire
+  session at hello time** instead of binding a local SOCKS listener
+  and rejecting individual CONNECTs. The operator (and the client
+  log) sees the rejection immediately.
+
+### Added
+
+- **`SessionHello { remotes: Vec<RemoteRequest> }`** plus
+  `SessionHelloResponse::{Ok { tunnel_ids }, Failed(_)}` exchanged on
+  the very first bi-stream of every QUIC connection. Reverse tunnels
+  spawn their server-side listener as soon as the hello is accepted —
+  no more lazy registration.
+- **`OpenConn { tunnel_id, dynamic: Option<DynamicTarget> }`** plus
+  `OpenConnResponse` framing the start of every data-plane
+  bi-stream. `dynamic` is populated only for SOCKS5 dynamic streams
+  (per-CONNECT TCP target, per-target UDP); static tunnels reuse the
+  declared `kind` from the hello.
+- **`server_receive_session_hello` / `server_reply_session_hello` /
+  `client_send_session_hello` / `send_open_conn` /
+  `receive_open_conn` / `reply_open_conn`** in
+  `src/common/tunnel.rs`. The legacy
+  `client_send_remote_request` / `server_receive_remote_request`
+  pair has been removed.
+- **`ServerState::register_tunnels`** — bulk-registers every tunnel
+  declared in one hello, returning the freshly minted entries in
+  declaration order. Replaces the deduplicating
+  `find_or_create_tunnel`; the per-client `tunnel_index` field is
+  gone.
+
+### Changed
+
+- **Tunnel handlers take a `tunnel_id: u64` argument.** Affects
+  `tunnel_tcp_client`, `tunnel_udp_client`, `tunnel_socks_client`.
+  The id is the server-assigned identifier from the hello reply
+  (forward) or the tunnel's own id used by the server to push reverse
+  conns (reverse).
+- **Server validates every requested remote up front** via
+  `validate_remotes` against `--allow-reverse` / `--allow-socks`.
+  First offending declaration short-circuits the whole session with
+  a single `RemoteFailed` reason instead of rejecting per-stream.
+- **No more per-tunnel control bi-stream.** Reverse declarations,
+  forward TCP/UDP "first conn", and the 0.7 announce stream all
+  collapse into the single hello + per-conn `OpenConn` model.
+
 ## [0.7.0] - 2026-05-03
 
 Phase-1 of the long-tracked **server admin API + CLI** README item: the
