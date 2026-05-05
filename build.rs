@@ -21,6 +21,13 @@
 //!   RUSNEL_EMBED_CLIENT_CERT     — client cert (PEM); enables client mTLS
 //!                                  default
 //!   RUSNEL_EMBED_CLIENT_KEY      — client key (PEM); pairs with above
+//!   RUSNEL_EMBED_ARGS            — full default argv (subcommand + flags +
+//!                                  positional args), shell-quoted. When the
+//!                                  resulting binary is invoked with no
+//!                                  arguments, these are used as the argv —
+//!                                  turning the build into a true
+//!                                  "drop-and-run" deployment. Any explicit
+//!                                  CLI args at runtime override this.
 //!
 //! For each path-style var, the file's bytes are baked in via include_bytes!
 //! and the absolute path is recorded as a `cargo:rerun-if-changed` so cargo
@@ -94,6 +101,32 @@ fn main() {
             _ => {
                 writeln!(f, "pub const {const_name}: Option<&str> = None;").unwrap();
             }
+        }
+    }
+
+    // RUSNEL_EMBED_ARGS — full default argv, shell-quoted. We split it here at
+    // build time (POSIX shell rules) so the runtime side just sees a frozen
+    // `&[&str]` and doesn't need a shell-parser dep. Splitting at build time
+    // also surfaces quoting errors as a `cargo build` failure rather than a
+    // runtime panic in the deployed binary.
+    println!("cargo:rerun-if-env-changed=RUSNEL_EMBED_ARGS");
+    match env::var("RUSNEL_EMBED_ARGS") {
+        Ok(s) if !s.trim().is_empty() => {
+            let parts = shlex::split(&s).unwrap_or_else(|| {
+                panic!("RUSNEL_EMBED_ARGS contains invalid shell quoting: {s:?}")
+            });
+            if parts.is_empty() {
+                writeln!(f, "pub const EMBED_ARGS: Option<&[&str]> = None;").unwrap();
+            } else {
+                write!(f, "pub const EMBED_ARGS: Option<&[&str]> = Some(&[").unwrap();
+                for p in &parts {
+                    write!(f, "{:?}, ", p).unwrap();
+                }
+                writeln!(f, "]);").unwrap();
+            }
+        }
+        _ => {
+            writeln!(f, "pub const EMBED_ARGS: Option<&[&str]> = None;").unwrap();
         }
     }
 }

@@ -40,7 +40,7 @@ Both sides reuse `tunnel_tcp_client` / `tunnel_tcp_server` etc. The "client" sid
 
 ### Embedded credentials
 
-`build.rs` reads `RUSNEL_EMBED_*` env vars at compile time and bakes cert/key bytes into the binary via `include_bytes!`. `src/embedded.rs` materializes them to temp files at runtime. This allows pre-configured "drop-and-run" binaries.
+`build.rs` reads `RUSNEL_EMBED_*` env vars at compile time and bakes cert/key bytes into the binary via `include_bytes!`. `src/embedded.rs` materializes them to temp files at runtime. This allows pre-configured "drop-and-run" binaries. `RUSNEL_EMBED_ARGS` additionally bakes in a default argv (subcommand + flags + positional args, shell-quoted; `shlex`-split at build time); `main.rs::resolve_argv` injects it whenever the binary is invoked with no CLI arguments, so explicit runtime args still override.
 
 ### Serialization
 

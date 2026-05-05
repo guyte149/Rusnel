@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-05-05
+
+Drop-and-run binaries can now bake the entire CLI invocation in at build
+time, not just the credentials.
+
+### Added
+
+- **`RUSNEL_EMBED_ARGS` build-time env var.** Set it to a shell-quoted
+  default argv (e.g. `"client 1.2.3.4:8080 R:2222:localhost:22"`) and the
+  resulting binary uses those arguments whenever it's invoked with no CLI
+  args. Combined with `RUSNEL_EMBED_CA` / `RUSNEL_EMBED_*` cert vars,
+  this produces a true zero-config drop-and-run binary that connects and
+  starts forwarding the moment it's executed. The string is
+  `shlex`-parsed at build time so quoting errors fail the build, not the
+  deployment. Any runtime args still win, so `--help`, `cert`, `ctl`,
+  and ad-hoc overrides keep working on a pre-configured build.
+
 ## [0.8.2] - 2026-05-05
 
 Remote-syntax parity pass with chisel. Adds `stdio:` forward remotes and

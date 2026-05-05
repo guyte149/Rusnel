@@ -30,6 +30,7 @@ pub fn any_embedded() -> bool {
         || EMBED_SERVER_ADDR.is_some()
         || EMBED_FINGERPRINT.is_some()
         || EMBED_SERVER_NAME.is_some()
+        || EMBED_ARGS.is_some()
 }
 
 /// Resolved on-disk locations of any embedded credentials. Each field is
