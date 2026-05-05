@@ -1,6 +1,12 @@
 use clap::crate_version;
 use clap::error::ErrorKind;
-use clap::{Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{
+    ArgMatches, Args as ClapArgs, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+};
+
+mod config_file;
+use config_file::{ClientSection, CongestionStr, LogFormatStr, ServerSection};
 use rusnel::cert;
 use rusnel::common::proxy::ProxyConfig;
 use rusnel::common::quic::Congestion;
@@ -186,6 +192,13 @@ enum Mode {
     /// used as the default.
     #[allow(clippy::too_many_arguments)]
     Server {
+        /// Load defaults from a TOML file's `[server]` section. CLI
+        /// flags explicitly passed on the command line override the
+        /// file. Unknown keys in the file are rejected. See
+        /// [Configuration file] in the README for the schema.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
         /// defines Rusnel listening host (the network interface)
         #[arg(long, default_value_t = IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)))]
         host: IpAddr,
@@ -292,11 +305,19 @@ enum Mode {
     /// case those are used as the default.
     #[allow(clippy::too_many_arguments)]
     Client {
-        /// defines the Rusnel server address (in form of host:port)
-        #[arg(value_parser = parse_server_addr)]
-        server: ServerEndpoint,
+        /// Load defaults from a TOML file's `[client]` section. CLI
+        /// flags explicitly passed on the command line override the
+        /// file; the positional `<server>` and `<remote>...` are also
+        /// supplied by `server = "..."` and `remotes = [...]` in the
+        /// file when omitted from the CLI. Unknown keys are rejected.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
 
-        #[arg(name = "remote", required = true, value_parser = parse_remote, value_delimiter = ' ', num_args = 1.., help=r#"
+        /// defines the Rusnel server address (in form of host:port)
+        #[arg(value_parser = parse_server_addr, required = false)]
+        server: Option<ServerEndpoint>,
+
+        #[arg(name = "remote", required = false, value_parser = parse_remote, value_delimiter = ' ', num_args = 0.., help=r#"
 <remote>s are remote connections tunneled through the server, each which come in the form:
 
     <local-host>:<local-port>:<remote-host>:<remote-port>/<protocol>
@@ -729,6 +750,306 @@ fn resolve_argv(raw: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Returns true if the named clap argument was *explicitly* provided
+/// on the CLI (i.e. its `value_source` is `CommandLine`), so the
+/// config-file merge knows whether it's safe to overwrite the
+/// resolved value with one from the file.
+fn cli_explicit(matches: &ArgMatches, name: &str) -> bool {
+    matches.value_source(name) == Some(ValueSource::CommandLine)
+}
+
+/// Tiny helper: when the CLI value came from clap's default *and* the
+/// config file has a value, the file wins. Otherwise the CLI value
+/// (which is either the operator's explicit choice or the clap
+/// default) stays put.
+fn pick<T>(cli_val: T, was_explicit: bool, file_val: Option<T>) -> T {
+    if was_explicit {
+        cli_val
+    } else {
+        file_val.unwrap_or(cli_val)
+    }
+}
+
+/// Snapshot of every server-mode CLI field, used as the merge unit
+/// between clap's parsed values and the config file's `[server]`
+/// section. Re-destructured at the call site after merging.
+struct ServerCli {
+    host: IpAddr,
+    port: u16,
+    allow_reverse: bool,
+    allow_socks: bool,
+    insecure: bool,
+    tls_self_signed: bool,
+    tls_state_dir: Option<PathBuf>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    tls_ca: Option<PathBuf>,
+    congestion: CongestionArg,
+    max_connections: usize,
+    admin_socket: Option<PathBuf>,
+    no_admin_socket: bool,
+    is_verbose: bool,
+    is_debug: bool,
+    is_quiet: bool,
+    log_format: LogFormat,
+}
+
+fn merge_server_with_file(
+    cli: ServerCli,
+    file: Option<ServerSection>,
+    matches: &ArgMatches,
+) -> ServerCli {
+    let Some(file) = file else { return cli };
+
+    // TLS-mode flags are mutually exclusive on the CLI (clap enforces
+    // it). Once we mix in a config file the CLI's choice is what the
+    // operator typed *now* — so if any TLS-mode flag was explicit on
+    // the CLI, drop *all* TLS-mode bits from the file. This avoids
+    // ambiguity when the file says e.g. `tls_self_signed = true` and
+    // the operator overrides with `--tls-cert ... --tls-key ...`.
+    let cli_set_tls = cli_explicit(matches, "insecure")
+        || cli_explicit(matches, "tls_self_signed")
+        || cli_explicit(matches, "tls_cert")
+        || cli_explicit(matches, "tls_key")
+        || cli_explicit(matches, "tls_ca");
+
+    ServerCli {
+        host: pick(cli.host, cli_explicit(matches, "host"), file.host),
+        port: pick(cli.port, cli_explicit(matches, "port"), file.port),
+        allow_reverse: pick(
+            cli.allow_reverse,
+            cli_explicit(matches, "allow_reverse"),
+            file.allow_reverse,
+        ),
+        allow_socks: pick(
+            cli.allow_socks,
+            cli_explicit(matches, "allow_socks"),
+            file.allow_socks,
+        ),
+        insecure: if cli_set_tls {
+            cli.insecure
+        } else {
+            file.insecure.unwrap_or(cli.insecure)
+        },
+        tls_self_signed: if cli_set_tls {
+            cli.tls_self_signed
+        } else {
+            file.tls_self_signed.unwrap_or(cli.tls_self_signed)
+        },
+        tls_state_dir: if cli_set_tls {
+            cli.tls_state_dir
+        } else {
+            file.tls_state_dir.or(cli.tls_state_dir)
+        },
+        tls_cert: if cli_set_tls {
+            cli.tls_cert
+        } else {
+            file.tls_cert.or(cli.tls_cert)
+        },
+        tls_key: if cli_set_tls {
+            cli.tls_key
+        } else {
+            file.tls_key.or(cli.tls_key)
+        },
+        tls_ca: if cli_set_tls {
+            cli.tls_ca
+        } else {
+            file.tls_ca.or(cli.tls_ca)
+        },
+        congestion: pick(
+            cli.congestion,
+            cli_explicit(matches, "congestion"),
+            file.congestion.map(CongestionArg::from),
+        ),
+        max_connections: pick(
+            cli.max_connections,
+            cli_explicit(matches, "max_connections"),
+            file.max_connections,
+        ),
+        admin_socket: pick(
+            cli.admin_socket,
+            cli_explicit(matches, "admin_socket"),
+            file.admin_socket.map(Some),
+        ),
+        no_admin_socket: pick(
+            cli.no_admin_socket,
+            cli_explicit(matches, "no_admin_socket"),
+            file.no_admin_socket,
+        ),
+        is_verbose: pick(
+            cli.is_verbose,
+            cli_explicit(matches, "is_verbose"),
+            file.verbose,
+        ),
+        is_debug: pick(cli.is_debug, cli_explicit(matches, "is_debug"), file.debug),
+        is_quiet: pick(cli.is_quiet, cli_explicit(matches, "is_quiet"), file.quiet),
+        log_format: pick(
+            cli.log_format,
+            cli_explicit(matches, "log_format"),
+            file.log_format.map(LogFormat::from),
+        ),
+    }
+}
+
+struct ClientCli {
+    server: Option<ServerEndpoint>,
+    remotes: Vec<RemoteRequest>,
+    insecure: bool,
+    tls_fingerprint: Option<String>,
+    tls_ca: Option<PathBuf>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    tls_server_name: Option<String>,
+    congestion: CongestionArg,
+    max_retry_count: i64,
+    max_retry_interval: Duration,
+    proxy: Option<ProxyConfig>,
+    is_verbose: bool,
+    is_debug: bool,
+    is_quiet: bool,
+    log_format: LogFormat,
+}
+
+fn merge_client_with_file(
+    cli: ClientCli,
+    file: Option<ClientSection>,
+    matches: &ArgMatches,
+) -> Result<ClientCli, String> {
+    let Some(file) = file else { return Ok(cli) };
+
+    // The positional `server` is special: clap stores it as
+    // `Option<ServerEndpoint>` (we made it non-required so the file
+    // can supply it). Parse the file's string here and let the file
+    // win if the CLI didn't give one.
+    let server = match cli.server {
+        Some(s) => Some(s),
+        None => match &file.server {
+            Some(s) => Some(
+                parse_server_addr(s).map_err(|e| format!("[client].server in config file: {e}"))?,
+            ),
+            None => None,
+        },
+    };
+
+    // Likewise for remotes — empty Vec from clap means "not provided".
+    let remotes = if cli.remotes.is_empty() {
+        match &file.remotes {
+            Some(list) => list
+                .iter()
+                .map(|r| {
+                    parse_remote(r)
+                        .map_err(|e| format!("[client].remotes entry `{r}` in config file: {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        }
+    } else {
+        cli.remotes
+    };
+
+    let proxy = if cli_explicit(matches, "proxy") {
+        cli.proxy
+    } else {
+        match file.proxy.as_deref() {
+            Some(s) => {
+                Some(parse_proxy(s).map_err(|e| format!("[client].proxy in config file: {e}"))?)
+            }
+            None => cli.proxy,
+        }
+    };
+
+    let max_retry_interval = if cli_explicit(matches, "max_retry_interval") {
+        cli.max_retry_interval
+    } else {
+        file.max_retry_interval
+            .map(Duration::from_secs)
+            .unwrap_or(cli.max_retry_interval)
+    };
+
+    let cli_set_tls = cli_explicit(matches, "insecure")
+        || cli_explicit(matches, "tls_fingerprint")
+        || cli_explicit(matches, "tls_ca")
+        || cli_explicit(matches, "tls_cert")
+        || cli_explicit(matches, "tls_key");
+
+    Ok(ClientCli {
+        server,
+        remotes,
+        insecure: if cli_set_tls {
+            cli.insecure
+        } else {
+            file.insecure.unwrap_or(cli.insecure)
+        },
+        tls_fingerprint: if cli_set_tls {
+            cli.tls_fingerprint
+        } else {
+            file.tls_fingerprint.or(cli.tls_fingerprint)
+        },
+        tls_ca: if cli_set_tls {
+            cli.tls_ca
+        } else {
+            file.tls_ca.or(cli.tls_ca)
+        },
+        tls_cert: if cli_set_tls {
+            cli.tls_cert
+        } else {
+            file.tls_cert.or(cli.tls_cert)
+        },
+        tls_key: if cli_set_tls {
+            cli.tls_key
+        } else {
+            file.tls_key.or(cli.tls_key)
+        },
+        tls_server_name: pick(
+            cli.tls_server_name,
+            cli_explicit(matches, "tls_server_name"),
+            file.tls_server_name.map(Some),
+        ),
+        congestion: pick(
+            cli.congestion,
+            cli_explicit(matches, "congestion"),
+            file.congestion.map(CongestionArg::from),
+        ),
+        max_retry_count: pick(
+            cli.max_retry_count,
+            cli_explicit(matches, "max_retry_count"),
+            file.max_retry_count,
+        ),
+        max_retry_interval,
+        proxy,
+        is_verbose: pick(
+            cli.is_verbose,
+            cli_explicit(matches, "is_verbose"),
+            file.verbose,
+        ),
+        is_debug: pick(cli.is_debug, cli_explicit(matches, "is_debug"), file.debug),
+        is_quiet: pick(cli.is_quiet, cli_explicit(matches, "is_quiet"), file.quiet),
+        log_format: pick(
+            cli.log_format,
+            cli_explicit(matches, "log_format"),
+            file.log_format.map(LogFormat::from),
+        ),
+    })
+}
+
+impl From<CongestionStr> for CongestionArg {
+    fn from(c: CongestionStr) -> Self {
+        match c {
+            CongestionStr::Cubic => CongestionArg::Cubic,
+            CongestionStr::Bbr => CongestionArg::Bbr,
+        }
+    }
+}
+
+impl From<LogFormatStr> for LogFormat {
+    fn from(f: LogFormatStr) -> Self {
+        match f {
+            LogFormatStr::Compact => LogFormat::Compact,
+            LogFormatStr::Json => LogFormat::Json,
+        }
+    }
+}
+
 fn main() {
     if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
         Args::command()
@@ -739,10 +1060,23 @@ fn main() {
             .exit();
     }
 
-    let args = Args::parse_from(resolve_argv(std::env::args().collect()));
+    let argv = resolve_argv(std::env::args().collect());
+    let matches = match Args::command().try_get_matches_from(argv) {
+        Ok(m) => m,
+        Err(e) => e.exit(),
+    };
+    let args = match Args::from_arg_matches(&matches) {
+        Ok(a) => a,
+        Err(e) => Args::command().error(ErrorKind::InvalidValue, e).exit(),
+    };
+    // Sub-`ArgMatches` for the chosen subcommand, used to detect which
+    // CLI flags were explicitly provided so the config-file merge
+    // doesn't overwrite them.
+    let sub_matches = matches.subcommand().map(|(_, sm)| sm);
 
     match args.mode {
         Mode::Server {
+            config,
             host,
             port,
             allow_reverse,
@@ -762,6 +1096,60 @@ fn main() {
             is_quiet,
             log_format,
         } => {
+            let server_section = match config.as_deref() {
+                Some(path) => match config_file::load(path) {
+                    Ok(cf) => cf.server,
+                    Err(e) => Args::command()
+                        .error(ErrorKind::InvalidValue, format!("{e:#}"))
+                        .exit(),
+                },
+                None => None,
+            };
+            let sm = sub_matches.expect("server subcommand has matches");
+            let merged = merge_server_with_file(
+                ServerCli {
+                    host,
+                    port,
+                    allow_reverse,
+                    allow_socks,
+                    insecure,
+                    tls_self_signed,
+                    tls_state_dir,
+                    tls_cert,
+                    tls_key,
+                    tls_ca,
+                    congestion,
+                    max_connections,
+                    admin_socket,
+                    no_admin_socket,
+                    is_verbose,
+                    is_debug,
+                    is_quiet,
+                    log_format,
+                },
+                server_section,
+                sm,
+            );
+            let ServerCli {
+                host,
+                port,
+                allow_reverse,
+                allow_socks,
+                insecure,
+                tls_self_signed,
+                tls_state_dir,
+                tls_cert,
+                tls_key,
+                tls_ca,
+                congestion,
+                max_connections,
+                admin_socket,
+                no_admin_socket,
+                is_verbose,
+                is_debug,
+                is_quiet,
+                log_format,
+            } = merged;
             init_logging(LoggingOpts {
                 verbose: is_verbose,
                 debug: is_debug,
@@ -818,6 +1206,7 @@ fn main() {
             run_server(server_config);
         }
         Mode::Client {
+            config,
             server,
             remotes,
             insecure,
@@ -835,6 +1224,79 @@ fn main() {
             is_quiet,
             log_format,
         } => {
+            let client_section = match config.as_deref() {
+                Some(path) => match config_file::load(path) {
+                    Ok(cf) => cf.client,
+                    Err(e) => Args::command()
+                        .error(ErrorKind::InvalidValue, format!("{e:#}"))
+                        .exit(),
+                },
+                None => None,
+            };
+            let sm = sub_matches.expect("client subcommand has matches");
+            let merged = merge_client_with_file(
+                ClientCli {
+                    server,
+                    remotes,
+                    insecure,
+                    tls_fingerprint,
+                    tls_ca,
+                    tls_cert,
+                    tls_key,
+                    tls_server_name,
+                    congestion,
+                    max_retry_count,
+                    max_retry_interval,
+                    proxy,
+                    is_verbose,
+                    is_debug,
+                    is_quiet,
+                    log_format,
+                },
+                client_section,
+                sm,
+            );
+            let merged = match merged {
+                Ok(m) => m,
+                Err(e) => Args::command().error(ErrorKind::InvalidValue, e).exit(),
+            };
+            let ClientCli {
+                server,
+                remotes,
+                insecure,
+                tls_fingerprint,
+                tls_ca,
+                tls_cert,
+                tls_key,
+                tls_server_name,
+                congestion,
+                max_retry_count,
+                max_retry_interval,
+                proxy,
+                is_verbose,
+                is_debug,
+                is_quiet,
+                log_format,
+            } = merged;
+            let server = match server {
+                Some(s) => s,
+                None => Args::command()
+                    .error(
+                        ErrorKind::MissingRequiredArgument,
+                        "missing server address: pass it as a positional argument or set \
+                         `server = \"host:port\"` in the [client] section of --config",
+                    )
+                    .exit(),
+            };
+            if remotes.is_empty() {
+                Args::command()
+                    .error(
+                        ErrorKind::MissingRequiredArgument,
+                        "no remotes specified: pass at least one as a positional argument or set \
+                         `remotes = [...]` in the [client] section of --config",
+                    )
+                    .exit();
+            }
             init_logging(LoggingOpts {
                 verbose: is_verbose,
                 debug: is_debug,

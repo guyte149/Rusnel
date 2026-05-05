@@ -1,10 +1,24 @@
 # Rusnel
 
 [![Crates.io](https://img.shields.io/crates/v/rusnel.svg)](https://crates.io/crates/rusnel)
+[![Crates.io downloads](https://img.shields.io/crates/d/rusnel.svg)](https://crates.io/crates/rusnel)
+[![License](https://img.shields.io/crates/l/rusnel.svg)](LICENSE)
 
 ## Description
 Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC protocol. Single executable including both client and server. Written in Rust.
 
+## Quickstart
+
+```bash
+cargo install rusnel
+
+# on your public box
+rusnel server --tls-self-signed
+# server cert fingerprint: sha256:abcd...
+
+# on your laptop — expose laptop:8080 as <server>:8080
+rusnel client --tls-fingerprint sha256:abcd... <server>:8080 R:8080
+```
 
 ## Features
 -   Easy to use
@@ -18,21 +32,35 @@ Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC proto
 -   Layered peer authentication: insecure, fingerprint pinning, or full mTLS
     (see [Authentication](#authentication)).
 
-
-
 ## Install
+
 ```bash
 cargo install rusnel
 ```
 
-### or
+Or build from source:
 
-Clone the repository and build the project:
 ```bash
 git clone https://github.com/guyte149/Rusnel.git
-cd rusnel
+cd Rusnel
 cargo build --release
 ```
+
+Pre-built binaries for Linux (x86_64 + aarch64, gnu and musl), macOS
+(x86_64 + Apple Silicon), and Windows (x86_64) are attached to each
+[GitHub release](https://github.com/guyte149/Rusnel/releases).
+
+### Docker
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR:
+
+```bash
+docker pull ghcr.io/guyte149/rusnel:latest
+docker run --rm -p 8080:8080/udp ghcr.io/guyte149/rusnel \
+    server --tls-self-signed
+```
+
+Note that QUIC runs over **UDP** — `-p 8080:8080/udp`, not `/tcp`.
 
 ## Usage
 ```bash
@@ -222,6 +250,53 @@ Recognised vars: `RUSNEL_EMBED_ARGS`, `RUSNEL_EMBED_SERVER_ADDR`,
 `RUSNEL_EMBED_CLIENT_CERT`, `RUSNEL_EMBED_CLIENT_KEY`. See
 [`build.rs`](build.rs) for the full mapping.
 
+## Configuration file
+
+Both `rusnel server` and `rusnel client` accept `--config <PATH>`
+pointing at a TOML file. A single file may contain a `[server]`
+section, a `[client]` section, or both — only the section matching
+the subcommand is read. Unknown keys are rejected so typos surface
+immediately.
+
+**Precedence**: CLI flag > config file > built-in default. Any flag
+you pass on the command line overrides whatever the file says.
+
+The TLS-mode flags are special: passing *any* of `--insecure`,
+`--tls-self-signed`, `--tls-cert`, `--tls-key`, `--tls-ca` (server)
+or `--insecure`, `--tls-fingerprint`, `--tls-ca`, `--tls-cert`,
+`--tls-key` (client) on the CLI causes all of the file's TLS-mode
+keys to be ignored — you get exactly the mode you typed, with no
+silent mixing.
+
+A minimal server example:
+
+```toml
+[server]
+host             = "0.0.0.0"
+port             = 8080
+allow_reverse    = true
+allow_socks      = true
+tls_self_signed  = true
+log_format       = "json"
+```
+
+A minimal client example:
+
+```toml
+[client]
+server  = "tunnel.example.com:8080"
+remotes = ["R:2222:localhost:22", "1.1.1.1:53/udp"]
+tls_fingerprint = "sha256:0123456789abcdef..."
+max_retry_interval = 60
+```
+
+Both positional arguments (`<server>` and `<remote>...`) can be
+supplied either by the file or on the CLI; the CLI version wins when
+both are present.
+
+A fully-annotated example covering every supported key lives at
+[`examples/rusnel.toml`](examples/rusnel.toml).
+
 ## Logging
 
 Rusnel uses [`tracing`](https://docs.rs/tracing) end-to-end with structured
@@ -324,8 +399,8 @@ The available endpoints (`GET` only in this release):
 | `/api/v1/history?limit=N`             | bounded ring buffer (256) of recent disconnects               |
 
 Write operations (kick client, kill conn), Prometheus `/metrics`, and
-an embedded web UI are tracked as phase-2 follow-ups in the TODO
-section.
+an embedded web UI are tracked as phase-2 follow-ups in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## Performance
 
@@ -348,27 +423,13 @@ The benchmark harness also includes a `wan` profile that applies
 (requires Docker; needs `--cap-add=NET_ADMIN` for netem profiles, which
 the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 
-## TODO
+## Roadmap
 
-### Reliability & UX
-- [x] client reconnect with exponential backoff (configurable via `--max-retry-count` / `--max-retry-interval`)
-- [x] proxy support for client: `--proxy socks5://[user:pass@]host:port` routes the QUIC connection through a SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4). HTTP CONNECT is intentionally not supported in this release because it cannot carry UDP — see the WebSocket-fallback transport item under `Security & access control` for the path that would unlock HTTP/SOCKS-CONNECT proxies.
-- [x] **production-grade structured logging**: `tracing-subscriber` with `EnvFilter` (`RUST_LOG=rusnel=debug,quinn=info`), `--quiet` / `-q`, `--log-format compact|json`, ISO-8601 UTC timestamps, ANSI colours auto-detected. Stable span hierarchy `client{client_id,peer}` → `tunnel{tunnel_id,dir,spec}` → `conn{conn_id,tunnel_id,peer}` (matching the `rusnel ctl` ID schema), and every conn emits a structured close summary with `bytes_in`, `bytes_out`, `dur_ms`. See "Logging" below.
+Planned protocol features (HTTP/3 facade, 0-RTT resumption, NAT
+hole-punching), access-control work (server-side ACLs, OIDC client
+auth), and admin-API phase 2 (kick / kill / Prometheus / web UI) are
+tracked in [`ROADMAP.md`](ROADMAP.md). Contributions welcome.
 
-### Protocol features
-- [ ] add fake-backend http/3 feature to server (real HTTP/3 facade for active probes that open streams)
-- [ ] skip the 1-RTT control handshake on static forwards (cache the parsed `RemoteRequest` server-side; saves ~1 RTT per accepted TCP connection on WAN)
-- [ ] enable QUIC 0-RTT connection resumption (session-ticket cache; cuts the first request after `rusnel client` startup from ~3 RTT to ~1 RTT)
-- [ ] UDP hole-punching / NAT traversal mode: introduce a `rusnel broker` role that observes each peer's reflexive address (optionally cross-checked against public STUN servers to detect symmetric NAT) and brokers a direct QUIC connection between two NATed peers à la libp2p DCUtR / Tailscale DERP, with relay fallback when punching fails. Lets two devices behind NAT talk without anyone running a publicly-reachable data-plane server.
+## License
 
-### Security & access control
-- [ ] server-side remote ACLs: `--allow` / `--deny` flags (and config-file equivalents) accepting wildcarded `RemoteRequest` patterns, e.g. `--allow socks`, `--allow R:2222:localhost:22`, `--deny tcp:*:*:169.254.169.254:*`. Default-deny dangerous targets like cloud instance-metadata endpoints. With mTLS, bind ACLs to the client cert subject / fingerprint so a contractor cert can be scoped to one tunnel.
-- [ ] SSO / OIDC client auth via a `rusnel-issuer` daemon: client runs `rusnel client --sso https://issuer.corp.example`, completes a device-code flow against the org's IdP (Okta/Google/Auth0), and the issuer mints a short-lived (~8h) mTLS client cert with the user's email/groups in the SAN. Rusnel server only needs to trust the issuer's CA — no IdP knowledge in the data path. ACLs from the bullet above match on cert subject/groups.
-
-### Operability
-- [x] **server admin API (read-only) + CLI**: typed `ServerState` (DashMap of clients/tunnels/conns with cumulative + per-conn byte counters), HTTP admin API on a unix socket gated by filesystem perms (mode 0600), three-layer client/tunnel/conn model exposed via `rusnel ctl clients|client|client-conns|tunnels|tunnel|tunnel-conns|conns|history|server`. See "Server admin API & `rusnel ctl`" above.
-- [ ] **server admin API — phase 2**: `DELETE /clients/:id` (kick), `DELETE /tunnels/:id` (kill tunnel), `GET /metrics` (Prometheus exporter), optional TCP+mTLS transport so the API is reachable over the network with the same PKI as the tunnel control plane.
-- [ ] **embedded web UI**: tiny `include_str!`'d HTML file (no JS framework) with a client/tunnel dashboard and bandwidth sparklines off `/metrics`.
-
-### Testing & CI
-- [ ] run `./benchmark/run.sh` on a self-hosted runner per release tag and commit the result PNGs back, so perf regressions surface in PRs
+Licensed under the [Apache License 2.0](LICENSE).

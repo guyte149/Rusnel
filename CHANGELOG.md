@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-05-05
+
+Configuration files. Server and client invocations no longer have to
+fit on one shell line.
+
+### Added
+
+- **`--config <PATH>` flag on `rusnel server` and `rusnel client`.**
+  Reads a TOML file with a `[server]` and/or `[client]` section whose
+  keys mirror the CLI flags one-for-one (snake_case). A single file
+  may contain both sections; only the one matching the chosen
+  subcommand is read. Unknown keys are rejected so typos surface as
+  parse errors instead of silently no-opping. CLI flags explicitly
+  passed on the command line always win, with one extra rule: passing
+  *any* TLS-mode flag (`--insecure` / `--tls-self-signed` /
+  `--tls-cert` / `--tls-key` / `--tls-ca` on the server, and the
+  client equivalents) causes all of the file's TLS-mode keys to be
+  ignored, so there's no ambiguity when overriding e.g. a
+  self-signed server config with explicit cert/key paths. The
+  positional `<server>` and `<remote>...` are also supplied by
+  `server = "..."` / `remotes = [...]` in the file when omitted from
+  the CLI. See [`examples/rusnel.toml`](examples/rusnel.toml) for an
+  annotated example covering every key.
+
 ## [0.9.1] - 2026-05-05
 
 Drop-and-run binaries can now bake the entire CLI invocation in at build
