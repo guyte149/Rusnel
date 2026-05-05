@@ -19,13 +19,17 @@ use rusnel::common::quic::{create_client_endpoint, Congestion};
 use rusnel::common::remote::{RemoteRequest, SessionHello};
 use rusnel::common::tls::ClientTlsConfig;
 use rusnel::common::tunnel::client_send_session_hello;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::timeout;
 
 /// Try to bind `127.0.0.1:port`. Returns `true` if the port is currently
 /// free (rebindable) and `false` if something else still holds it.
 async fn port_is_free(port: u16) -> bool {
     TcpListener::bind(format!("127.0.0.1:{port}")).await.is_ok()
+}
+
+async fn udp_port_is_free(port: u16) -> bool {
+    UdpSocket::bind(format!("127.0.0.1:{port}")).await.is_ok()
 }
 
 /// Poll until the predicate is satisfied or the deadline expires.
@@ -137,4 +141,139 @@ async fn test_server_releases_reverse_listener_on_client_disconnect() {
     })
     .await
     .expect("test_server_releases_reverse_listener_on_client_disconnect timed out");
+}
+
+/// Same shape as the reverse-TCP cleanup test, but for **reverse UDP**.
+/// The server binds a `UdpSocket` on the reverse-listen port and pumps
+/// datagrams back to the client over a per-source QUIC stream. The
+/// JoinSet that owns this UDP pump must be aborted on client
+/// disconnect so the UDP port is released.
+#[tokio::test]
+async fn test_server_releases_reverse_udp_socket_on_client_disconnect() {
+    timeout(Duration::from_secs(30), async {
+        init_crypto();
+        let server_port = get_available_port();
+        let reverse_listen_port = get_available_port();
+        let reverse_target_port = get_available_port();
+
+        let sc = server_config(server_port, true);
+        let server_handle = tokio::spawn(async move {
+            let _ = rusnel::server::run_async(sc).await;
+        });
+        tokio::time::sleep(STARTUP_DELAY).await;
+
+        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
+        let endpoint =
+            create_client_endpoint(&ClientTlsConfig::Insecure, Congestion::Cubic, server_addr)
+                .unwrap();
+        let connection = endpoint
+            .connect(server_addr, "127.0.0.1")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let remote = RemoteRequest::from_str(&format!(
+            "R:127.0.0.1:{reverse_listen_port}:127.0.0.1:{reverse_target_port}/udp"
+        ))
+        .unwrap();
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        let hello = SessionHello {
+            remotes: vec![remote],
+        };
+        let _ = client_send_session_hello(&hello, &mut send, &mut recv)
+            .await
+            .unwrap();
+
+        let bound = wait_until(Duration::from_secs(10), || async {
+            !udp_port_is_free(reverse_listen_port).await
+        })
+        .await;
+        assert!(
+            bound,
+            "server never bound the reverse UDP socket on port {reverse_listen_port}"
+        );
+
+        connection.close(VarInt::from_u32(0), b"test done");
+        endpoint.wait_idle().await;
+
+        let freed = wait_until(Duration::from_secs(5), || async {
+            udp_port_is_free(reverse_listen_port).await
+        })
+        .await;
+        assert!(
+            freed,
+            "server never released reverse UDP socket on port {reverse_listen_port} \
+             after client disconnect"
+        );
+
+        server_handle.abort();
+    })
+    .await
+    .expect("test_server_releases_reverse_udp_socket_on_client_disconnect timed out");
+}
+
+/// Reverse SOCKS cleanup: server binds a `TcpListener` on the
+/// reverse-listen port and runs the SOCKS5 negotiation loop. Same
+/// JoinSet-lifecycle invariant as the plain reverse-TCP test, but the
+/// listener task lives in a different module (`socks.rs`) and could
+/// reasonably regress independently.
+#[tokio::test]
+async fn test_server_releases_reverse_socks_listener_on_client_disconnect() {
+    timeout(Duration::from_secs(30), async {
+        init_crypto();
+        let server_port = get_available_port();
+        let reverse_listen_port = get_available_port();
+
+        let sc = server_config(server_port, true);
+        let server_handle = tokio::spawn(async move {
+            let _ = rusnel::server::run_async(sc).await;
+        });
+        tokio::time::sleep(STARTUP_DELAY).await;
+
+        let server_addr: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), server_port).into();
+        let endpoint =
+            create_client_endpoint(&ClientTlsConfig::Insecure, Congestion::Cubic, server_addr)
+                .unwrap();
+        let connection = endpoint
+            .connect(server_addr, "127.0.0.1")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let remote =
+            RemoteRequest::from_str(&format!("R:127.0.0.1:{reverse_listen_port}:socks")).unwrap();
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        let hello = SessionHello {
+            remotes: vec![remote],
+        };
+        let _ = client_send_session_hello(&hello, &mut send, &mut recv)
+            .await
+            .unwrap();
+
+        let bound = wait_until(Duration::from_secs(10), || async {
+            !port_is_free(reverse_listen_port).await
+        })
+        .await;
+        assert!(
+            bound,
+            "server never bound the reverse SOCKS listener on port {reverse_listen_port}"
+        );
+
+        connection.close(VarInt::from_u32(0), b"test done");
+        endpoint.wait_idle().await;
+
+        let freed = wait_until(Duration::from_secs(5), || async {
+            port_is_free(reverse_listen_port).await
+        })
+        .await;
+        assert!(
+            freed,
+            "server never released reverse SOCKS listener on port {reverse_listen_port} \
+             after client disconnect"
+        );
+
+        server_handle.abort();
+    })
+    .await
+    .expect("test_server_releases_reverse_socks_listener_on_client_disconnect timed out");
 }

@@ -383,3 +383,99 @@ async fn test_udp_forward_multiple_senders() {
     .await
     .expect("test_udp_forward_multiple_senders timed out");
 }
+
+/// Open several concurrent TCP forward connections through one tunnel,
+/// abort *one* of them mid-stream (RST), and verify every other
+/// connection completes its round-trip cleanly. Catches regressions
+/// where a single failing per-connection task tears down its siblings
+/// (shared `?` propagation, joined `try_join!` instead of `join!`,
+/// shared QUIC stream state, etc.).
+#[tokio::test]
+async fn test_tcp_forward_per_connection_failure_isolation() {
+    timeout(TEST_TIMEOUT, async {
+        let server_port = get_available_port();
+        let local_port = get_available_port();
+        let target_port = get_available_port();
+
+        let target_listener = TcpListener::bind(format!("127.0.0.1:{target_port}"))
+            .await
+            .unwrap();
+
+        // Server-side accept loop: read a length byte, echo back N bytes
+        // of the payload. The "bad" connection is identified by being
+        // RST'd by the client side mid-read; the others must still get
+        // their full echo.
+        let acceptor = tokio::spawn(async move {
+            for _ in 0..5 {
+                let (mut s, _) = target_listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16];
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) => return,
+                            Ok(n) => {
+                                if s.write_all(&buf[..n]).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                });
+            }
+        });
+
+        let remote =
+            RemoteRequest::from_str(&format!("127.0.0.1:{local_port}:127.0.0.1:{target_port}"))
+                .unwrap();
+        let _env = start_tunnel(server_port, false, vec![remote]).await;
+
+        // Open 5 conns. Conn 0 will be RST. Conns 1..5 must echo OK.
+        let mut conns = Vec::new();
+        for i in 0..5u8 {
+            let c = TcpStream::connect(format!("127.0.0.1:{local_port}"))
+                .await
+                .unwrap();
+            // Write a marker so the server-side accept actually pairs
+            // up before we abort conn 0.
+            let mut c = c;
+            c.write_all(&[i, b'!']).await.unwrap();
+            conns.push(c);
+        }
+
+        // Drain the round-trip for the marker on each conn.
+        for (i, c) in conns.iter_mut().enumerate() {
+            let mut buf = [0u8; 2];
+            c.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], i as u8);
+        }
+
+        // Abortive close on conn 0. `set_linger` is deprecated on
+        // tokio's TcpStream because it blocks-on-drop, which is exactly
+        // what we want here to force the RST out synchronously.
+        let bad = conns.remove(0);
+        #[allow(deprecated)]
+        {
+            let _ = bad.set_linger(Some(Duration::ZERO));
+        }
+        drop(bad);
+
+        // The remaining four connections must still echo a fresh
+        // payload and close cleanly.
+        for (i, mut c) in conns.into_iter().enumerate() {
+            let payload = format!("ok-{i}");
+            c.write_all(payload.as_bytes()).await.unwrap();
+            let mut buf = vec![0u8; payload.len()];
+            timeout(Duration::from_secs(5), c.read_exact(&mut buf))
+                .await
+                .unwrap_or_else(|_| panic!("conn {i} stalled after sibling RST"))
+                .unwrap_or_else(|e| panic!("conn {i} failed after sibling RST: {e}"));
+            assert_eq!(buf, payload.as_bytes());
+            c.shutdown().await.ok();
+        }
+
+        acceptor.abort();
+    })
+    .await
+    .expect("test_tcp_forward_per_connection_failure_isolation timed out");
+}

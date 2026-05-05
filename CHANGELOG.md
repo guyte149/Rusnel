@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-05-05
+
+Bug fix and integration-test expansion. The TCP tunnel now propagates
+hard errors (peer RST, abortive close mid-stream) across the QUIC
+connection in bounded time, instead of leaving the surviving direction
+blocked until the ~30 s idle timeout.
+
+### Fixed
+
+- **`tunnel_tcp_stream` no longer hangs the surviving direction on a
+  hard error.** The previous code used `tokio::join!` (intentional, to
+  preserve buffered bytes during graceful close) but had no error-path
+  bridge between the two copy futures: when one direction errored, the
+  other kept blocking on a QUIC read that would never produce data,
+  and the local `tcp_send` half wasn't dropped until QUIC's idle
+  timeout fired (~30 s). On hard errors the failing direction now
+  resets its `SendStream` (so the peer's `RecvStream` errors
+  immediately) and signals the local companion direction via a shared
+  `Notify` to abort its blocking copy and FIN the local TCP socket.
+  The graceful-close path (EOF → `shutdown().await`) is unchanged, so
+  no buffered bytes are lost on clean teardown.
+
+### Tests
+
+- Five new integration test files covering proxy semantics that were
+  previously uncovered: half-close in all four
+  forward/reverse × app→target/target→app variants plus SOCKS5
+  (`tests/half_close.rs`), abortive RST close in three variants and
+  reverse dead-target handling (`tests/abrupt_close.rs`), reverse-UDP
+  and reverse-SOCKS server-side listener cleanup on client disconnect
+  (extension to `tests/disconnect_cleanup.rs`), per-connection failure
+  isolation under multiplexing (extension to `tests/concurrent.rs`),
+  multi-client session isolation (`tests/multi_client.rs`), and UDP
+  per-sender response routing / oversized-datagram framing /
+  silent-target liveness (`tests/udp_semantics.rs`). Total suite is
+  now 124 tests, up from 109.
+
 ## [0.8.0] - 2026-05-03
 
 Wire-protocol overhaul. The per-stream `RemoteRequest` handshake — and
