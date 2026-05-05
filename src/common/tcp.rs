@@ -2,10 +2,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use quinn::{Connection, RecvStream, SendStream};
+use quinn::{Connection, RecvStream, SendStream, VarInt};
 use tokio::{
     io::{AsyncRead, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::Notify,
 };
 use tracing::{debug, debug_span, info, Instrument};
 
@@ -101,21 +102,100 @@ pub async fn tunnel_tcp_stream(
     let mut tcp_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, tcp_recv);
     let mut quic_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, quic_recv);
 
-    let client_to_server = async {
-        tokio::io::copy_buf(&mut tcp_recv, &mut send_channel).await?;
-        send_channel.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
+    // Shared "abort" signal that one direction can fire to wake the other
+    // out of its blocking copy (see big comment on the join! call below).
+    // `Arc<Notify>` rather than a oneshot because both directions need to
+    // observe the same edge.
+    let abort: Arc<Notify> = Arc::new(Notify::new());
+    // RESET_STREAM error code we use when tearing a stream down on a hard
+    // error. Application-defined; nothing on the wire interprets it.
+    const ABORT_CODE: u32 = 0;
+
+    let client_to_server = {
+        let abort = abort.clone();
+        async move {
+            // `notified()` registers as a waiter the first time it's
+            // polled, which is what `select!` does on entry. With `biased`
+            // ordering we register before polling the copy, so a
+            // notify_waiters() racing the copy's first poll still wakes us.
+            let outcome = tokio::select! {
+                biased;
+                _ = abort.notified() => CopyOutcome::Aborted,
+                r = tokio::io::copy_buf(&mut tcp_recv, &mut send_channel) => match r {
+                    Ok(_) => CopyOutcome::Eof,
+                    Err(e) => CopyOutcome::Errored(e),
+                },
+            };
+            match outcome {
+                CopyOutcome::Eof => {
+                    // Graceful EOF: forward as FIN over QUIC. The peer's
+                    // server_to_client copy will see this as a clean
+                    // end-of-stream and drain any buffered bytes still
+                    // flowing in the other direction.
+                    let _ = send_channel.shutdown().await;
+                    Ok(())
+                }
+                CopyOutcome::Errored(e) | CopyOutcome::AbortedWith(e) => {
+                    let _ = send_channel.reset(VarInt::from_u32(ABORT_CODE));
+                    abort.notify_waiters();
+                    Err(anyhow::Error::from(e))
+                }
+                CopyOutcome::Aborted => {
+                    // The other direction errored and signalled us; tear
+                    // our send side down too so the peer's matching recv
+                    // unblocks instead of waiting for QUIC idle timeout.
+                    let _ = send_channel.reset(VarInt::from_u32(ABORT_CODE));
+                    Ok(())
+                }
+            }
+        }
     };
 
-    let server_to_client = async {
-        tokio::io::copy_buf(&mut quic_recv, &mut tcp_send).await?;
-        tcp_send.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
+    let server_to_client = {
+        let abort = abort.clone();
+        async move {
+            let outcome = tokio::select! {
+                biased;
+                _ = abort.notified() => CopyOutcome::Aborted,
+                r = tokio::io::copy_buf(&mut quic_recv, &mut tcp_send) => match r {
+                    Ok(_) => CopyOutcome::Eof,
+                    Err(e) => CopyOutcome::Errored(e),
+                },
+            };
+            match outcome {
+                CopyOutcome::Eof => {
+                    let _ = tcp_send.shutdown().await;
+                    Ok(())
+                }
+                CopyOutcome::Errored(e) | CopyOutcome::AbortedWith(e) => {
+                    // FIN to the local TCP peer (best-effort — if the
+                    // socket is already RST'd, shutdown will fail and
+                    // there's nothing else to do).
+                    let _ = tcp_send.shutdown().await;
+                    abort.notify_waiters();
+                    Err(anyhow::Error::from(e))
+                }
+                CopyOutcome::Aborted => {
+                    let _ = tcp_send.shutdown().await;
+                    Ok(())
+                }
+            }
+        }
     };
 
-    // tokio::join! (not try_join!) so that an error in one direction doesn't
-    // cancel an in-flight copy in the other and silently lose buffered bytes
-    // (#20 §3). The application has already half-closed appropriately.
+    // tokio::join! (not try_join!) so that a graceful close in one
+    // direction (which surfaces as `Ok` from copy_buf and triggers a
+    // FIN/finish via `shutdown()`) doesn't cancel buffered bytes still
+    // draining in the other direction (#20 §3).
+    //
+    // For the *error* path we explicitly bridge the two halves with the
+    // `abort` Notify above: when one direction errors, it resets its
+    // QUIC send half (so the peer's recv errors immediately) and signals
+    // the other local future to stop blocking on its read. Without this,
+    // a hard error (peer RST, kernel-level disconnect) would hang the
+    // surviving half until QUIC's idle timeout (~30 s) tore the
+    // connection down — long enough that callers reasonably interpret
+    // it as a leak.
     let (c2s, s2c) = tokio::join!(client_to_server, server_to_client);
     match (&c2s, &s2c) {
         (Ok(_), Ok(_)) => debug!("closed"),
@@ -123,6 +203,17 @@ pub async fn tunnel_tcp_stream(
         (_, Err(e)) => debug!("server→client error: {}", e),
     }
     Ok(())
+}
+
+/// Outcome of a single-direction copy after the abort-aware select.
+/// `AbortedWith` is unused today but kept so the match arms stay
+/// exhaustive if a future variant carries a side-channel error.
+enum CopyOutcome {
+    Eof,
+    Errored(std::io::Error),
+    Aborted,
+    #[allow(dead_code)]
+    AbortedWith(std::io::Error),
 }
 
 pub async fn tunnel_tcp_client(
