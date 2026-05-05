@@ -4,18 +4,10 @@
 [![Crates.io downloads](https://img.shields.io/crates/d/rusnel.svg)](https://crates.io/crates/rusnel)
 [![License](https://img.shields.io/crates/l/rusnel.svg)](LICENSE)
 
-> A fast, encrypted TCP/UDP tunnel over **QUIC**. Like
-> [`chisel`](https://github.com/jpillora/chisel), but written in Rust and
-> multiplexed over QUIC instead of HTTP/WebSocket — so it stays fast on
-> lossy or high-latency links, carries UDP natively, and ships as a
-> single static binary that's both client and server.
+## Description
+Rusnel is a fast TCP/UDP tunnel, transported over and encrypted using QUIC protocol. Single executable including both client and server. Written in Rust.
 
-Rusnel punches through NAT with reverse tunnels, speaks SOCKS5 in both
-directions (with working UDP ASSOCIATE), and supports layered peer
-auth from "just `--insecure` for testing" to full mTLS with optional
-credentials baked into the binary at build time.
-
-## Quickstart (60 seconds)
+## Quickstart
 
 ```bash
 cargo install rusnel
@@ -27,44 +19,6 @@ rusnel server --tls-self-signed
 # on your laptop — expose laptop:8080 as <server>:8080
 rusnel client --tls-fingerprint sha256:abcd... <server>:8080 R:8080
 ```
-
-That's it — anything hitting `<server>:8080` is now reverse-tunneled to
-your laptop's `localhost:8080`. Swap `R:8080` for `socks` to get a
-forward SOCKS5 proxy, or `R:socks` for a reverse one (with UDP).
-
-## Why Rusnel?
-
-|                                | **Rusnel**         | [chisel](https://github.com/jpillora/chisel) | [frp](https://github.com/fatedier/frp) | `ssh -L`/`-D` |
-|--------------------------------|:------------------:|:--------------------------------------------:|:--------------------------------------:|:-------------:|
-| Transport                      | QUIC (UDP, TLS 1.3)| HTTP/WebSocket over TCP                      | TCP / KCP / QUIC                       | TCP (SSH)     |
-| Stream multiplexing            | ✅ native (QUIC)   | ✅ (SSH-in-WS)                               | ✅                                     | ✅            |
-| Survives lossy / high-RTT WAN  | ✅ BBR + 0-RTT     | ❌ HoL blocking                              | partial                                | ❌            |
-| Native UDP forward             | ✅                 | ❌                                           | ✅                                     | ❌            |
-| **Reverse SOCKS5 with UDP ASSOCIATE** | ✅          | ❌                                           | ❌                                     | ❌            |
-| Single static binary           | ✅                 | ✅                                           | ❌ (server + client)                   | n/a           |
-| mTLS peer auth                 | ✅                 | ❌ (shared user/pass)                        | partial                                | ✅ (keys)     |
-| Embed credentials at build time| ✅                 | ❌                                           | ❌                                     | ❌            |
-| Language                       | Rust               | Go                                           | Go                                     | C             |
-
-If you've ever reached for `chisel` and wished it carried UDP, did
-mTLS, or held up on a 4G hotspot — that's Rusnel.
-
-### Numbers
-
-iperf3 over a tunneled TCP forward on loopback (100 MB × 5 runs,
-median); 64 B echo for latency:
-
-|              | **Rusnel** | chisel  | Rusnel vs chisel |
-|--------------|-----------:|--------:|-----------------:|
-| Throughput   | **779.55 Mbps** | 377.42 Mbps | **2.07×**  |
-| Latency p50  | 0.267 ms   | 0.242 ms | ~tied            |
-| Latency p99  | **0.463 ms** | 2.005 ms | **4.3× better** |
-
-Reproduce locally with `./benchmark/run.sh`. See
-[Performance](#performance) for charts and the WAN profile (25 ms RTT
-+ loss via `tc netem`), where the gap widens further thanks to QUIC's
-per-stream loss recovery vs. chisel's TCP-in-TCP head-of-line
-blocking.
 
 ## Features
 -   Easy to use
