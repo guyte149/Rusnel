@@ -705,6 +705,30 @@ fn resolve_client_tls(
     )
 }
 
+/// If the binary was built with `RUSNEL_EMBED_ARGS` and the operator invoked
+/// it with no arguments, splice the baked-in argv in after `argv[0]`. Any
+/// runtime args win — so `--help`, `cert`, `ctl`, ad-hoc overrides, etc. all
+/// still work on a pre-configured "drop-and-run" build.
+fn resolve_argv(raw: Vec<String>) -> Vec<String> {
+    if raw.len() > 1 {
+        return raw;
+    }
+    let Some(embedded) = embedded::EMBED_ARGS else {
+        return raw;
+    };
+    let mut out = Vec::with_capacity(1 + embedded.len());
+    // Preserve argv[0] (program name) so clap's error/help formatting is
+    // unchanged. If for some reason argv[0] is missing (extremely rare —
+    // only on hand-crafted execve calls), fall back to the package name.
+    out.push(
+        raw.into_iter()
+            .next()
+            .unwrap_or_else(|| env!("CARGO_PKG_NAME").to_string()),
+    );
+    out.extend(embedded.iter().map(|s| s.to_string()));
+    out
+}
+
 fn main() {
     if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
         Args::command()
@@ -715,7 +739,7 @@ fn main() {
             .exit();
     }
 
-    let args = Args::parse();
+    let args = Args::parse_from(resolve_argv(std::env::args().collect()));
 
     match args.mode {
         Mode::Server {
