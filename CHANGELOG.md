@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-05-05
+
+Release-pipeline fixes shaken out by the first `v0.10.0` tag.
+
+### Fixed
+
+- **Drop Windows from the release matrix.** The library does not
+  compile on `x86_64-pc-windows-msvc` because `src/server/admin.rs`
+  uses `tokio::net::UnixListener` and POSIX `Permissions::set_mode`
+  unconditionally. Windows can be added back here once the admin API
+  is `#[cfg(unix)]`-gated (or stubbed with a Windows named pipe).
+- **Simplify the Dockerfile** so the multi-arch GHCR image actually
+  builds. The previous version used BuildKit cache mounts on
+  `target/` plus a cross-compile path for arm64; the cache mount got
+  unmounted before the multi-stage `COPY --from=builder` could
+  resolve the binary, breaking the build. Replaced with a plain
+  `cargo build --release` under buildx + QEMU emulation, using
+  `gcr.io/distroless/cc-debian12:nonroot` as the runtime base.
+
 ## [0.10.0] - 2026-05-05
 
 Configuration files. Server and client invocations no longer have to
