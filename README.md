@@ -67,23 +67,16 @@ per-stream loss recovery vs. chisel's TCP-in-TCP head-of-line
 blocking.
 
 ## Features
-
-- Single static binary, both client and server (and `rusnel ctl` admin CLI).
-- QUIC transport (TLS 1.3 mandatory; pluggable congestion control: cubic / BBR).
-- Forward and reverse tunneling for TCP **and** UDP.
-- Forward and reverse SOCKS5 — including UDP ASSOCIATE in both directions.
-- `stdio:` remotes for piping a tunnel into stdin/stdout (great for
-  `ProxyCommand` and one-shot scripts).
-- Layered peer authentication: `--insecure`, fingerprint pinning, or full mTLS.
-- Drop-and-run binaries: bake CA + client cert + default argv into the
-  binary at compile time via `RUSNEL_EMBED_*` env vars.
-- Auto-reconnect with exponential backoff and **RFC 8305 Happy Eyeballs**
-  v4/v6 racing.
-- Read-only admin HTTP API on a unix socket + `rusnel ctl` for live
-  introspection of clients, tunnels, and per-conn byte counters.
-- Structured `tracing` logs (compact or JSON) with stable span IDs that
-  match the admin-API schema.
-- SOCKS5-proxy-aware client (`--proxy socks5://...`) for chained hops.
+-   Easy to use
+-   Single executable including both client and server.
+-   Uses QUIC protocol for fast and multiplexed communication.
+-   Encrypted connections using the QUIC protocol (TLS 1.3).
+-   Static forward tunneling (TCP, UDP)
+-   Static reverse tunneling (TCP, UDP)
+-   Dynamic tunneling (socks5, including UDP ASSOCIATE)
+-   Dynamic reverse tunneling (reverse socks5, including UDP ASSOCIATE)
+-   Layered peer authentication: insecure, fingerprint pinning, or full mTLS
+    (see [Authentication](#authentication)).
 
 ## Install
 
@@ -482,12 +475,6 @@ Planned protocol features (HTTP/3 facade, 0-RTT resumption, NAT
 hole-punching), access-control work (server-side ACLs, OIDC client
 auth), and admin-API phase 2 (kick / kill / Prometheus / web UI) are
 tracked in [`ROADMAP.md`](ROADMAP.md). Contributions welcome.
-
-## Contributing
-
-Bug reports, feature requests, and PRs are welcome — see
-[`CONTRIBUTING.md`](CONTRIBUTING.md). Security issues: please follow
-[`SECURITY.md`](SECURITY.md) instead of filing a public issue.
 
 ## License
 

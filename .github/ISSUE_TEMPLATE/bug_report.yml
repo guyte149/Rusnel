@@ -9,7 +9,8 @@ body:
         as you can — debug logs (`--debug` or
         `RUST_LOG=rusnel=debug,quinn=info`) help a lot.
 
-        Security issues: please follow [SECURITY.md](../../SECURITY.md)
+        Security issues: please use [GitHub private vulnerability
+        reporting](https://github.com/guyte149/Rusnel/security/advisories/new)
         instead of filing here.
   - type: input
     id: version
