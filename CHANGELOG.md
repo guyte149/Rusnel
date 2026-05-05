@@ -5,7 +5,55 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.1] - 2026-05-05
+## [0.8.2] - 2026-05-05
+
+Remote-syntax parity pass with chisel. Adds `stdio:` forward remotes and
+drops the Rusnel-specific `R/` reverse-prefix shorthand.
+
+### Added
+
+- **`stdio:<host>:<port>` and `stdio:<port>` remote syntax.** The client
+  pipes its own stdin/stdout to/from the tunnel instead of binding a
+  local listener, and exits cleanly when stdin EOFs. Useful as a
+  drop-in `ssh -o ProxyCommand` target. Forward-only — `R:stdio:…` is
+  rejected at parse time, as is `stdio:socks` (stdio is single-conn,
+  socks is dynamic). Server-side dispatch is unchanged: the remote
+  side still sees a normal TCP/UDP `connect`. Adds a `stdio: bool`
+  field to `RemoteRequest`; serialized with `#[serde(default)]` so old
+  control-plane payloads decode unchanged.
+- **`RemoteRequest::is_stdio()`** helper for the new field.
+
+### Changed
+
+- **Logs now go to stderr instead of stdout** (`server`, `client`,
+  `cert`, and `ctl` modes). CLI-tool convention, and a hard
+  requirement for forward `stdio:` remotes — the data plane on stdio
+  pipes the process's stdout to the tunnel, so any byte we emit on
+  stdout would have corrupted the peer's view of the stream.
+  Operators piping logs to a file or analyzer should adjust their
+  redirects (`2>` instead of `>` / `|`).
+
+### Removed
+
+- **`R/` reverse-prefix shorthand.** Chisel only accepts `R:`, and we
+  now match that exactly. `R/foo` is now a parse error. Use `R:foo`.
+
+### Tests
+
+- Twelve new parser unit tests in `src/common/remote.rs`: stdio with
+  host:port, port-only (defaulting remote to 127.0.0.1), `/udp`
+  suffix, IPv6 remote; rejection of `R:stdio:…`, bare `stdio`, and
+  `stdio:socks`; rejection of `R/`, bare `R`, and `R:` with empty
+  remainder; trailing-colon error path; IDN host pass-through;
+  `Display` round-trip for stdio.
+- New e2e smoke test (`tests/stdio.rs`) that spawns the actual
+  `rusnel` binary with `stdio:127.0.0.1:<echo>`, pipes three framed
+  messages through the child's stdin/stdout against an in-process
+  server + echo target, then drops stdin and asserts the child exits
+  zero. Exercises CLI parsing, session hello, the stdio data plane,
+  and the EOF-driven shutdown path end-to-end.
+
+
 
 Bug fix and integration-test expansion. The TCP tunnel now propagates
 hard errors (peer RST, abortive close mid-stream) across the QUIC

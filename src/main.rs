@@ -310,6 +310,7 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         1.1.1.1:53/udp
         [::1]:80
         [::1]:5000:[2001:db8::1]:80
+        stdio:example.com:22
 
     IPv6 literals must be wrapped in [brackets] (same convention as URLs and ssh -L).
 
@@ -317,6 +318,11 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
 
     Remotes can specify "socks" in place of remote-host and remote-port.
     The default local host and port for a "socks" remote is 127.0.0.1:1080.
+
+    Remotes can specify "stdio" in place of <local-host>:<local-port> to pipe
+    the client process's stdin/stdout to/from the tunnel instead of binding a
+    local listener (useful as an `ssh -o ProxyCommand` target). Stdio remotes
+    are forward-only.
         "#)]
         remotes: Vec<RemoteRequest>,
 
@@ -826,6 +832,7 @@ fn main() {
                 .with_max_level(tracing::Level::WARN)
                 .with_target(false)
                 .without_time()
+                .with_writer(std::io::stderr)
                 .init();
             let socket_path = socket.unwrap_or_else(rusnel::ctl::default_socket_path);
             if let Err(e) = run_ctl(&socket_path, json, action) {
@@ -840,6 +847,7 @@ fn main() {
                 .with_max_level(tracing::Level::INFO)
                 .with_target(false)
                 .without_time()
+                .with_writer(std::io::stderr)
                 .init();
             if let Err(e) = run_cert(action) {
                 Args::command()
@@ -981,7 +989,14 @@ fn set_log_level(is_verbose: bool, is_debug: bool) {
     } else {
         tracing::Level::INFO
     };
-    tracing_subscriber::fmt().with_max_level(log_level).init();
+    // Log to stderr, not stdout. CLI-tool convention, and a hard
+    // requirement for forward `stdio:` remotes — those pipe the
+    // process's stdout to the tunnel, so any byte we emit on stdout
+    // becomes part of the data stream and corrupts the peer's view.
+    tracing_subscriber::fmt()
+        .with_max_level(log_level)
+        .with_writer(std::io::stderr)
+        .init();
 
     debug!("log level: {}", log_level);
 }

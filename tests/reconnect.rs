@@ -180,10 +180,9 @@ async fn run_test_session(connection: Connection) {
             }
             // Only forward TCP is exercised by this test stub.
             let req = match parent.kind {
-                RemoteKind::Tcp { local, remote } => RemoteRequest {
-                    direction: Direction::Forward,
-                    kind: RemoteKind::Tcp { local, remote },
-                },
+                RemoteKind::Tcp { local, remote } => {
+                    RemoteRequest::new(Direction::Forward, RemoteKind::Tcp { local, remote })
+                }
                 _ => return,
             };
             if let Err(e) = tunnel_tcp_server(recv, send, req, None).await {
