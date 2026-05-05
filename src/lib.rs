@@ -8,7 +8,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 pub mod cert;
 pub mod client;
@@ -160,10 +160,10 @@ impl Default for ReconnectConfig {
 /// directly so they don't end up nesting runtimes (which would either panic
 /// in debug builds or silently deadlock in release).
 pub fn run_server(config: ServerConfig) {
-    info!("running server");
+    debug!("starting server runtime");
     let result = build_runtime().and_then(|rt| rt.block_on(server::run_async(config)));
     if let Err(e) = result {
-        error!("an error occurred: {}", e);
+        error!(error = %e, "server exited with error");
     }
 }
 
@@ -172,10 +172,10 @@ pub fn run_server(config: ServerConfig) {
 /// See [`run_server`] for the rationale on why embedders should prefer
 /// [`client::run_async`].
 pub fn run_client(config: ClientConfig) {
-    info!("running client");
+    debug!("starting client runtime");
     let result = build_runtime().and_then(|rt| rt.block_on(client::run_async(config)));
     if let Err(e) = result {
-        error!("an error occurred: {}", e);
+        error!(error = %e, "client exited with error");
     }
 }
 

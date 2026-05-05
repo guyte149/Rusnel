@@ -317,6 +317,62 @@ resolved at build time via `include_bytes!` (the file no longer needs to exist
 on the deployment host); string-style vars are baked in as `&'static str`.
 See [`build.rs`](build.rs) for the full mapping.
 
+## Logging
+
+Rusnel uses [`tracing`](https://docs.rs/tracing) end-to-end with structured
+fields and stable span hierarchy.
+
+**Verbosity** (mutually exclusive):
+
+```bash
+rusnel server ...                  # INFO  (default)
+rusnel server -v ...               # DEBUG for rusnel modules
+rusnel server --debug ...          # TRACE for rusnel modules
+rusnel server -q / --quiet ...     # WARN-and-above only
+```
+
+For finer control set `RUST_LOG` directly — it overrides the flags:
+
+```bash
+RUST_LOG=rusnel=debug,quinn=info rusnel server ...
+RUST_LOG=rusnel::common::tcp=trace rusnel client ...
+```
+
+**Format**: human-readable compact (default) or one JSON object per line for
+log aggregators:
+
+```bash
+rusnel server --log-format json ...
+```
+
+Logs go to **stderr** (so forward `stdio:` tunnels can use stdout cleanly).
+Timestamps are ISO-8601 UTC with millisecond precision; ANSI colours are
+auto-detected from the stderr TTY.
+
+**Schema**. Every event is wrapped in spans whose field names match the
+`rusnel ctl` / admin-API ID schema, so logs grep cleanly against API output:
+
+| Span      | Fields                                  | Where                          |
+|-----------|-----------------------------------------|--------------------------------|
+| `client`  | `client_id`, `peer`                     | server, per QUIC session       |
+| `session` | `peer`                                  | client, per QUIC session       |
+| `tunnel`  | `tunnel_id`, `dir`, `spec`              | both, per declared remote      |
+| `conn`    | `conn_id`, `tunnel_id`, `peer`, `proto` | both, per data-plane stream    |
+
+Every conn emits a `conn opened` event on entry and a `conn closed` event on
+exit carrying `bytes_in`, `bytes_out`, and `dur_ms` — useful for ad-hoc
+"who used the most bytes" greps without standing up a metrics pipeline.
+
+Example session (compact format, ANSI stripped):
+
+```
+2026-05-05T11:03:55.022Z  INFO client: connected client_id=1 peer=127.0.0.1:62178
+2026-05-05T11:03:55.027Z  INFO client: session established count=1
+2026-05-05T11:03:55.027Z  INFO client: tunnel registered tunnel_id=1 dir="forward" spec=19999=>127.0.0.1:9999/tcp
+2026-05-05T11:03:55.670Z  INFO conn: conn opened conn_id=1 tunnel_id=1 peer="127.0.0.1:9999"
+2026-05-05T11:03:55.671Z  INFO conn: conn closed bytes_in=12 bytes_out=17 dur_ms=1
+```
+
 ## Performance
 
 Rusnel (QUIC) vs [Chisel](https://github.com/jpillora/chisel) (SSH-over-WebSocket)
@@ -343,7 +399,7 @@ the script adds for you). See [`benchmark/`](benchmark/) for tunables.
 ### Reliability & UX
 - [x] client reconnect with exponential backoff (configurable via `--max-retry-count` / `--max-retry-interval`)
 - [x] proxy support for client: `--proxy socks5://[user:pass@]host:port` routes the QUIC connection through a SOCKS5 proxy via UDP ASSOCIATE (RFC 1928 §4). HTTP CONNECT is intentionally not supported in this release because it cannot carry UDP — see the WebSocket-fallback transport item under `Security & access control` for the path that would unlock HTTP/SOCKS-CONNECT proxies.
-- [ ] `RUST_LOG`-style env filter for `tracing-subscriber` (per-module log levels)
+- [x] **production-grade structured logging**: `tracing-subscriber` with `EnvFilter` (`RUST_LOG=rusnel=debug,quinn=info`), `--quiet` / `-q`, `--log-format compact|json`, ISO-8601 UTC timestamps, ANSI colours auto-detected. Stable span hierarchy `client{client_id,peer}` → `tunnel{tunnel_id,dir,spec}` → `conn{conn_id,tunnel_id,peer}` (matching the `rusnel ctl` ID schema), and every conn emits a structured close summary with `bytes_in`, `bytes_out`, `dur_ms`. See "Logging" below.
 
 ### Protocol features
 - [ ] add fake-backend http/3 feature to server (real HTTP/3 facade for active probes that open streams)

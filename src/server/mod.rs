@@ -36,7 +36,7 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
     let endpoint =
         create_server_endpoint(config.host, config.port, &config.tls, config.congestion)?;
     let listen_addr = endpoint.local_addr()?;
-    info!("Listening on {}", listen_addr);
+    info!(addr = %listen_addr, "server listening");
 
     let client_counter = AtomicUsize::new(0);
 
@@ -71,9 +71,9 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
         tokio::select! {
             ctrl_c = signal::ctrl_c() => {
                 if let Err(e) = ctrl_c {
-                    error!("failed to listen for ^C signal: {e}");
+                    error!(error = %e, "failed to listen for ^C signal");
                 }
-                info!("Shutdown signal received. Closing endpoint and notifying clients...");
+                info!("shutdown signal received, notifying clients");
                 endpoint.close(VarInt::from_u32(CLOSE_CODE_SERVER_SHUTDOWN), b"server received ^C");
                 endpoint.wait_idle().await;
                 if let Some(h) = admin_handle {
@@ -90,9 +90,9 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
             }
             maybe_conn = endpoint.accept() => {
                 let Some(conn) = maybe_conn else { break };
-                let client_id = client_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                let remote_addr = conn.remote_address();
-                let span = info_span!("client", id = client_id, remote = %remote_addr);
+                let client_id = (client_counter.fetch_add(1, Ordering::Relaxed) + 1) as u64;
+                let peer = conn.remote_address();
+                let span = info_span!("client", client_id = client_id, peer = %peer);
 
                 // Try to claim a connection permit. If the cap is reached,
                 // refuse the new connection rather than queueing it — a
@@ -102,10 +102,7 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
                     match limiter.clone().try_acquire_owned() {
                         Ok(p) => Some(p),
                         Err(_) => {
-                            warn!(
-                                remote = %remote_addr,
-                                "rejecting connection: max-connections cap reached"
-                            );
+                            warn!(peer = %peer, "rejected: max-connections cap reached");
                             conn.refuse();
                             continue;
                         }
@@ -119,18 +116,18 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
                 let state_for_client = state.clone();
                 tokio::spawn(
                     async move {
-                        info!("client connected");
+                        info!("connected");
                         match handle_client_connection(
                             conn,
                             allow_reverse,
                             allow_socks,
-                            client_id as u64,
+                            client_id,
                             state_for_client,
                         )
                         .await
                         {
-                            Ok(reason) => info!("client disconnected: {reason}"),
-                            Err(e) => error!("connection failed: {e}"),
+                            Ok(reason) => info!(reason = %reason, "disconnected"),
+                            Err(e) => error!(error = %e, "session failed"),
                         }
                         // Permit released here on drop, freeing a slot.
                         drop(permit);
@@ -197,21 +194,27 @@ async fn handle_client_connection(
             // Rejected sessions still count as a disconnect so they
             // appear in /history. The QUIC connection itself is left
             // for the client to close once it sees the failure reply.
-            error!("session hello rejected: {e}");
+            error!(error = %e, "session hello rejected");
             state.deregister_client(client_id, format!("hello rejected: {e}"));
             return Err(e);
         }
     };
+
+    info!(count = registered_tunnels.len(), "session established");
 
     // Reverse handlers own long-lived local sockets — bind them as
     // soon as the hello is accepted, before any conn flows. Forward
     // tunnels are passive on the server side; their conns arrive as
     // OpenConn frames on the per-conn loop below.
     for tunnel in &registered_tunnels {
+        let dir = match tunnel.direction {
+            Direction::Forward => "forward",
+            Direction::Reverse => "reverse",
+        };
         info!(
             tunnel_id = tunnel.id,
+            dir,
             spec = %tunnel.spec,
-            direction = ?tunnel.direction,
             "tunnel registered"
         );
         if matches!(tunnel.direction, Direction::Reverse) {
@@ -267,7 +270,7 @@ async fn handle_client_connection(
                 break Ok("connection reset by peer".to_string());
             }
             Err(e) => {
-                error!("stream error: {e}");
+                error!(error = %e, "stream error");
                 break Err(e.into());
             }
             Ok(s) => s,
@@ -277,7 +280,7 @@ async fn handle_client_connection(
         let fut = handle_open_conn(stream, state_for_conn);
         tunnels.spawn(async move {
             if let Err(e) = fut.await {
-                error!("conn failed: {}", e);
+                error!(error = %e, "conn failed");
             }
         });
     };
@@ -288,7 +291,7 @@ async fn handle_client_connection(
     let aborted = tunnels.len();
     tunnels.shutdown().await;
     if aborted > 0 {
-        debug!("aborted {aborted} tunnel task(s) on disconnect");
+        debug!(aborted, "aborted in-flight tunnel tasks");
     }
 
     let reason = match &outcome {
@@ -353,8 +356,9 @@ fn spawn_reverse_handler(
 ) {
     let handle = Arc::new(TunnelHandle::new(state, tunnel.clone()));
     let span = info_span!(
-        "reverse",
+        "tunnel",
         tunnel_id = tunnel.id,
+        dir = "reverse",
         spec = %tunnel.spec,
     );
     tasks.spawn(
@@ -376,7 +380,7 @@ fn spawn_reverse_handler(
                 }
             };
             if let Err(e) = result {
-                error!("reverse handler failed: {e}");
+                error!(error = %e, "reverse handler failed");
             }
         }
         .instrument(span),
@@ -419,26 +423,41 @@ async fn handle_open_conn(
     reply_open_conn(&mut send, &OpenConnResponse::Ok).await?;
 
     let peer = dispatch.peer_label();
-    let _conn = state.register_conn(&tunnel, peer.clone());
-    info!(
-        conn_id = _conn.id(),
+    let conn = state.register_conn(&tunnel, peer.clone());
+    let conn_id = conn.id();
+    let counters = conn.counters();
+
+    let span = info_span!(
+        "conn",
+        conn_id = conn_id,
         tunnel_id = tunnel.id,
         peer = peer.as_deref().unwrap_or("-"),
-        "conn opened"
     );
-    let counters = Some(_conn.counters());
-
-    async {
-        match dispatch {
-            ForwardDispatch::Tcp(req) => tunnel_tcp_server(recv, send, req, counters).await,
-            ForwardDispatch::Udp(req) => tunnel_udp_server(recv, send, req, counters).await,
+    async move {
+        info!("conn opened");
+        let started = std::time::Instant::now();
+        let result = match dispatch {
+            ForwardDispatch::Tcp(req) => {
+                tunnel_tcp_server(recv, send, req, Some(counters.clone())).await
+            }
+            ForwardDispatch::Udp(req) => {
+                tunnel_udp_server(recv, send, req, Some(counters.clone())).await
+            }
+        };
+        let (bytes_in, bytes_out) = counters.snapshot();
+        let dur_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(()) => info!(bytes_in, bytes_out, dur_ms, "conn closed"),
+            Err(e) => warn!(bytes_in, bytes_out, dur_ms, error = %e, "conn closed (error)"),
         }
+        // Drop `conn` (the ConnGuard) to deregister now that we've
+        // logged the summary; without this it would only drop after
+        // the surrounding `?`-propagation, after which the snapshot
+        // would race with the deregister path.
+        drop(conn);
+        result
     }
-    .instrument(info_span!(
-        "conn",
-        tunnel_id = tunnel.id,
-        spec = %tunnel.spec,
-    ))
+    .instrument(span)
     .await
 }
 

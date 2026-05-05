@@ -30,7 +30,7 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
     let mut endpoints = match &config.proxy {
         None => Some(EndpointPool::new(&config)?),
         Some(p) => {
-            info!("routing QUIC through proxy: {p}");
+            info!(proxy = %p, "routing QUIC through SOCKS5 proxy");
             None
         }
     };
@@ -43,7 +43,7 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
     let shutdown_tx_clone = shutdown_tx.clone();
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {
-            info!("Shutdown signal received. Broadcasting shutdown...");
+            info!("shutdown signal received");
             let _ = shutdown_tx_clone.send(());
         }
     });
@@ -53,7 +53,7 @@ pub async fn run_async(config: ClientConfig) -> Result<()> {
     if let Some(pool) = endpoints.as_ref() {
         pool.wait_idle().await;
     }
-    debug!("Run function completed");
+    debug!("client run loop exited");
     result
 }
 
@@ -145,10 +145,7 @@ async fn run_with_reconnect(
     loop {
         let mut shutdown_rx = shutdown_tx.subscribe();
 
-        info!(
-            "connecting to server at: {} (sni: {})",
-            config.server, server_name
-        );
+        info!(server = %config.server, sni = %server_name, "connecting");
 
         // Two connect strategies: direct (Happy Eyeballs across all resolved
         // addresses, sharing QUIC endpoints across attempts) or via SOCKS5
@@ -172,20 +169,24 @@ async fn run_with_reconnect(
 
         match connect_outcome {
             Some(Ok(connection)) => {
-                info!("Connected successfully");
+                let peer = connection.remote_address();
+                info!(peer = %peer, "connected");
                 attempt = 0;
                 backoff = initial_backoff;
 
-                let outcome = run_connection(connection, config, shutdown_tx).await;
+                let session_span = info_span!("session", peer = %peer);
+                let outcome = run_connection(connection, config, shutdown_tx)
+                    .instrument(session_span)
+                    .await;
                 match outcome {
                     SessionOutcome::Shutdown => return Ok(()),
                     SessionOutcome::Disconnected(reason) => {
-                        warn!("connection lost: {}", reason);
+                        warn!(reason = %reason, "connection lost");
                     }
                 }
             }
             Some(Err(e)) => {
-                warn!("connection attempt failed: {}", e);
+                warn!(error = %e, "connect attempt failed");
             }
             None => unreachable!(),
         }
@@ -200,13 +201,14 @@ async fn run_with_reconnect(
             }
         }
 
+        let attempt_label = match max_retries {
+            Some(m) => format!("{attempt}/{m}"),
+            None => attempt.to_string(),
+        };
         info!(
-            "reconnecting in {:?} (attempt {}{})",
-            backoff,
-            attempt,
-            max_retries
-                .map(|m| format!("/{m}"))
-                .unwrap_or_else(|| "".to_string()),
+            backoff_ms = backoff.as_millis() as u64,
+            attempt = %attempt_label,
+            "reconnecting"
         );
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
@@ -266,11 +268,11 @@ async fn happy_eyeballs_connect(
     while let Some((addr, res)) = races.next().await {
         match res {
             Ok(conn) => {
-                debug!(%addr, "happy eyeballs winner");
+                debug!(addr = %addr, "happy eyeballs winner");
                 return Ok(conn);
             }
             Err(e) => {
-                debug!(%addr, error = %e, "happy eyeballs candidate failed");
+                debug!(addr = %addr, error = %e, "happy eyeballs candidate failed");
                 last_error = Some(format!("{addr}: {e}"));
             }
         }
@@ -298,11 +300,7 @@ async fn proxied_connect(
         .first()
         .copied()
         .ok_or_else(|| anyhow!("no candidate addresses to connect to"))?;
-    debug!(
-        target = %server,
-        proxy = %proxy,
-        "establishing SOCKS5 UDP ASSOCIATE for QUIC connection",
-    );
+    debug!(server = %server, proxy = %proxy, "opening SOCKS5 UDP ASSOCIATE for QUIC");
     let endpoint =
         create_client_endpoint_via_proxy(&config.tls, config.congestion, server, proxy).await?;
     let connection = endpoint.connect(server, server_name)?.await?;
@@ -339,7 +337,15 @@ async fn run_connection(
             return SessionOutcome::Disconnected(format!("session hello failed: {e}"));
         }
     };
-    info!("session established with {} tunnel(s)", tunnel_ids.len());
+    info!(count = tunnel_ids.len(), "session established");
+    for (remote, tunnel_id) in config.remotes.iter().zip(tunnel_ids.iter().copied()) {
+        let dir = if matches!(remote.direction, Direction::Reverse) {
+            "reverse"
+        } else {
+            "forward"
+        };
+        info!(tunnel_id, dir, spec = %remote, "tunnel registered");
+    }
 
     // Map tunnel_id → declared remote so the reverse-accept loop can
     // resolve OpenConn frames the server pushes back.
@@ -362,7 +368,7 @@ async fn run_connection(
         }
         let remote = remote.clone();
         let connection_clone = connection.clone();
-        let span = info_span!("tunnel", tunnel_id = tunnel_id, remote = %remote);
+        let span = info_span!("tunnel", tunnel_id, dir = "forward", spec = %remote);
         // Stdio tunnels are single-shot: when stdin EOFs (or the
         // remote end closes), the user expects the whole client to
         // exit cleanly — not silently keep running with no input. We
@@ -373,7 +379,7 @@ async fn run_connection(
         let task = task::spawn(
             async move {
                 if let Err(e) = handle_forward_tunnel(connection_clone, remote, tunnel_id).await {
-                    error!("failed: {}", e)
+                    error!(error = %e, "forward tunnel failed");
                 }
                 if let Some(tx) = shutdown_for_task {
                     let _ = tx.send(());
@@ -392,7 +398,7 @@ async fn run_connection(
             let quic_connection = connection_clone.clone();
             let remotes = remotes_for_accept.clone();
             if let Err(e) = client_accept_reverse_conn(quic_connection, remotes).await {
-                debug!("reverse conn accept loop ended: {}", e);
+                debug!(error = %e, "reverse-accept loop ended");
                 break;
             }
         }
@@ -403,7 +409,7 @@ async fn run_connection(
     let mut shutdown_rx = shutdown_tx.subscribe();
     let outcome = tokio::select! {
         _ = shutdown_rx.recv() => {
-            info!("Shutting down client and notifying server...");
+            info!("disconnecting and notifying server");
             // Close the QUIC connection with a non-zero application code and
             // a human-readable reason. The server logs this verbatim, so the
             // operator on the other end sees "client closed (code 130, client
@@ -490,7 +496,7 @@ async fn client_accept_reverse_conn(
         let open = match receive_open_conn(&mut recv).await {
             Ok(o) => o,
             Err(e) => {
-                error!("failed to read OpenConn frame: {e}");
+                error!(error = %e, "failed to read OpenConn frame");
                 return;
             }
         };
@@ -504,8 +510,8 @@ async fn client_accept_reverse_conn(
                 )
                 .await;
                 error!(
-                    "server pushed conn for unknown tunnel id {}",
-                    open.tunnel_id
+                    tunnel_id = open.tunnel_id,
+                    "server pushed conn for unknown tunnel"
                 );
                 return;
             }
@@ -519,25 +525,29 @@ async fn client_accept_reverse_conn(
             Ok(d) => d,
             Err(e) => {
                 let _ = reply_open_conn(&mut send, &OpenConnResponse::Failed(e.to_string())).await;
-                error!("reverse OpenConn dispatch error: {e}");
+                error!(error = %e, "reverse OpenConn dispatch error");
                 return;
             }
         };
 
         if let Err(e) = reply_open_conn(&mut send, &OpenConnResponse::Ok).await {
-            error!("failed to ack reverse OpenConn: {e}");
+            error!(error = %e, "failed to ack reverse OpenConn");
             return;
         }
 
-        let span = info_span!("conn", tunnel_id = open.tunnel_id, remote = %dispatch);
+        let span =
+            info_span!("conn", tunnel_id = open.tunnel_id, dir = "reverse", target = %dispatch);
         async move {
-            info!("reverse conn opened");
+            info!("conn opened");
+            let started = std::time::Instant::now();
             let result = match dispatch {
                 ReverseDispatch::Tcp(req) => tunnel_tcp_server(recv, send, req, None).await,
                 ReverseDispatch::Udp(req) => tunnel_udp_server(recv, send, req, None).await,
             };
-            if let Err(e) = result {
-                debug!("reverse conn ended: {e}");
+            let dur_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(()) => info!(dur_ms, "conn closed"),
+                Err(e) => debug!(dur_ms, error = %e, "conn closed (error)"),
             }
         }
         .instrument(span)

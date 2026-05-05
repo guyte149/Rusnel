@@ -49,12 +49,12 @@ const DEFAULT_HISTORY_LIMIT: usize = 50;
 /// full read access to live client metadata.
 pub async fn serve(state: ServerState, path: &Path) -> Result<()> {
     let listener = bind(path)?;
-    info!(socket = %path.display(), "admin API listening");
+    info!(socket = %path.display(), "admin api listening");
     let router = router(state);
     let path_owned: PathBuf = path.to_path_buf();
     let result = accept_loop(listener, router).await;
     if let Err(e) = std::fs::remove_file(&path_owned) {
-        debug!("failed to unlink admin socket on shutdown: {e}");
+        debug!(error = %e, "failed to unlink admin socket on shutdown");
     }
     result
 }
@@ -94,7 +94,7 @@ async fn accept_loop(listener: UnixListener, router: Router) -> Result<()> {
         let (stream, _addr) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
-                warn!("admin accept error: {e}");
+                warn!(error = %e, "admin accept error");
                 continue;
             }
         };
@@ -109,7 +109,7 @@ async fn accept_loop(listener: UnixListener, router: Router) -> Result<()> {
                 .serve_connection(io, TowerToHyperService::new(svc))
                 .await
             {
-                debug!("admin connection ended: {e}");
+                debug!(error = %e, "admin connection ended");
             }
         });
     }
