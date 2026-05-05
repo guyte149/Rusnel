@@ -17,7 +17,7 @@ use crate::common::remote::{
     Direction, DynamicTarget, OpenConnResponse, RemoteKind, RemoteRequest, SessionHello,
 };
 use crate::common::socks::tunnel_socks_client;
-use crate::common::tcp::{tunnel_tcp_client, tunnel_tcp_server};
+use crate::common::tcp::{tunnel_stdio_client, tunnel_tcp_client, tunnel_tcp_server};
 use crate::common::tunnel::{client_send_session_hello, receive_open_conn, reply_open_conn};
 use crate::common::udp::{tunnel_udp_client, tunnel_udp_server};
 use crate::{ClientConfig, ReconnectConfig};
@@ -363,11 +363,20 @@ async fn run_connection(
         let remote = remote.clone();
         let connection_clone = connection.clone();
         let span = info_span!("tunnel", tunnel_id = tunnel_id, remote = %remote);
+        // Stdio tunnels are single-shot: when stdin EOFs (or the
+        // remote end closes), the user expects the whole client to
+        // exit cleanly — not silently keep running with no input. We
+        // hand the stdio task a shutdown handle so it can fire that
+        // signal itself when it returns.
+        let shutdown_for_task = remote.is_stdio().then(|| shutdown_tx.clone());
 
         let task = task::spawn(
             async move {
                 if let Err(e) = handle_forward_tunnel(connection_clone, remote, tunnel_id).await {
                     error!("failed: {}", e)
+                }
+                if let Some(tx) = shutdown_for_task {
+                    let _ = tx.send(());
                 }
                 anyhow::Ok(())
             }
@@ -446,6 +455,13 @@ async fn handle_forward_tunnel(
     remote: RemoteRequest,
     tunnel_id: u64,
 ) -> Result<()> {
+    // Stdio short-circuits the listener-bind path: there is no local
+    // socket to accept on, just a single bi-stream wired to the
+    // process's stdin/stdout. The server-side dispatch is unchanged
+    // (it sees a normal Tcp/Udp tunnel via the OpenConn frame).
+    if remote.is_stdio() {
+        return tunnel_stdio_client(quic_connection, tunnel_id).await;
+    }
     match &remote.kind {
         RemoteKind::Socks5 { .. } => {
             tunnel_socks_client(quic_connection, remote, None, tunnel_id).await?
@@ -553,37 +569,37 @@ fn resolve_reverse_dispatch(
         ));
     }
     match (&parent.kind, dynamic) {
-        (RemoteKind::Tcp { local, remote }, None) => Ok(ReverseDispatch::Tcp(RemoteRequest {
-            direction: Direction::Reverse,
-            kind: RemoteKind::Tcp {
+        (RemoteKind::Tcp { local, remote }, None) => Ok(ReverseDispatch::Tcp(RemoteRequest::new(
+            Direction::Reverse,
+            RemoteKind::Tcp {
                 local: *local,
                 remote: remote.clone(),
             },
-        })),
-        (RemoteKind::Udp { local, remote }, None) => Ok(ReverseDispatch::Udp(RemoteRequest {
-            direction: Direction::Reverse,
-            kind: RemoteKind::Udp {
+        ))),
+        (RemoteKind::Udp { local, remote }, None) => Ok(ReverseDispatch::Udp(RemoteRequest::new(
+            Direction::Reverse,
+            RemoteKind::Udp {
                 local: *local,
                 remote: remote.clone(),
             },
-        })),
+        ))),
         (RemoteKind::Socks5 { local }, Some(DynamicTarget::Tcp(target))) => {
-            Ok(ReverseDispatch::Tcp(RemoteRequest {
-                direction: Direction::Reverse,
-                kind: RemoteKind::Tcp {
+            Ok(ReverseDispatch::Tcp(RemoteRequest::new(
+                Direction::Reverse,
+                RemoteKind::Tcp {
                     local: *local,
                     remote: target,
                 },
-            }))
+            )))
         }
         (RemoteKind::Socks5 { local }, Some(DynamicTarget::Udp(target))) => {
-            Ok(ReverseDispatch::Udp(RemoteRequest {
-                direction: Direction::Reverse,
-                kind: RemoteKind::Udp {
+            Ok(ReverseDispatch::Udp(RemoteRequest::new(
+                Direction::Reverse,
+                RemoteKind::Udp {
                     local: *local,
                     remote: target,
                 },
-            }))
+            )))
         }
         (RemoteKind::Socks5 { .. }, None) => Err(anyhow!(
             "server pushed reverse SOCKS5 conn without a dynamic target"

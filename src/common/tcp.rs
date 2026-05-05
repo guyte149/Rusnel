@@ -216,6 +216,101 @@ enum CopyOutcome {
     AbortedWith(std::io::Error),
 }
 
+/// Forward-stdio tunnel: open a single bi-stream, announce it with an
+/// [`OpenConn`] keyed by `tunnel_id`, then pipe the *client process's*
+/// stdin/stdout to/from that stream. Returns when either side closes,
+/// at which point the caller is expected to tear the QUIC session down
+/// (stdio is single-shot — there is no listen-loop to come back to).
+///
+/// Only used for forward tunnels: `R:stdio:...` is rejected at parse
+/// time. SOCKS5 stdio is likewise rejected — stdio is a single conn,
+/// SOCKS is many.
+pub async fn tunnel_stdio_client(quic_connection: Connection, tunnel_id: u64) -> Result<()> {
+    use crate::common::tunnel::send_open_conn;
+
+    debug!("opening stdio tunnel");
+    let (mut send, mut recv) = quic_connection.open_bi().await?;
+    send_open_conn(
+        &OpenConn {
+            tunnel_id,
+            dynamic: None,
+        },
+        &mut send,
+        &mut recv,
+    )
+    .await?;
+    info!("stdio tunnel ready (piping stdin/stdout)");
+
+    let mut stdin = BufReader::with_capacity(TUNNEL_COPY_BUF, tokio::io::stdin());
+    let mut stdout = tokio::io::stdout();
+    let mut quic_recv = BufReader::with_capacity(TUNNEL_COPY_BUF, recv);
+
+    let abort: Arc<Notify> = Arc::new(Notify::new());
+    const ABORT_CODE: u32 = 0;
+
+    let stdin_to_quic = {
+        let abort = abort.clone();
+        async move {
+            let outcome = tokio::select! {
+                biased;
+                _ = abort.notified() => CopyOutcome::Aborted,
+                r = tokio::io::copy_buf(&mut stdin, &mut send) => match r {
+                    Ok(_) => CopyOutcome::Eof,
+                    Err(e) => CopyOutcome::Errored(e),
+                },
+            };
+            match outcome {
+                CopyOutcome::Eof => {
+                    let _ = send.shutdown().await;
+                    Ok(())
+                }
+                CopyOutcome::Errored(e) | CopyOutcome::AbortedWith(e) => {
+                    let _ = send.reset(VarInt::from_u32(ABORT_CODE));
+                    abort.notify_waiters();
+                    Err(anyhow::Error::from(e))
+                }
+                CopyOutcome::Aborted => {
+                    let _ = send.reset(VarInt::from_u32(ABORT_CODE));
+                    Ok(())
+                }
+            }
+        }
+    };
+
+    let quic_to_stdout = {
+        let abort = abort.clone();
+        async move {
+            let outcome = tokio::select! {
+                biased;
+                _ = abort.notified() => CopyOutcome::Aborted,
+                r = tokio::io::copy_buf(&mut quic_recv, &mut stdout) => match r {
+                    Ok(_) => CopyOutcome::Eof,
+                    Err(e) => CopyOutcome::Errored(e),
+                },
+            };
+            // Flush stdout best-effort regardless of outcome — the
+            // user wants to see whatever bytes made it before EOF.
+            let _ = stdout.flush().await;
+            match outcome {
+                CopyOutcome::Eof => Ok(()),
+                CopyOutcome::Errored(e) | CopyOutcome::AbortedWith(e) => {
+                    abort.notify_waiters();
+                    Err(anyhow::Error::from(e))
+                }
+                CopyOutcome::Aborted => Ok(()),
+            }
+        }
+    };
+
+    let (s2q, q2s) = tokio::join!(stdin_to_quic, quic_to_stdout);
+    match (&s2q, &q2s) {
+        (Ok(_), Ok(_)) => debug!("stdio tunnel closed"),
+        (Err(e), _) => debug!("stdin→quic error: {}", e),
+        (_, Err(e)) => debug!("quic→stdout error: {}", e),
+    }
+    Ok(())
+}
+
 pub async fn tunnel_tcp_client(
     quic_connection: Connection,
     remote: RemoteRequest,

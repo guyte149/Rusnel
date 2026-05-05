@@ -363,10 +363,7 @@ fn spawn_reverse_handler(
             // declaration so the existing handlers (which still take a
             // `RemoteRequest` for local-bind / target lookup) keep
             // working unchanged.
-            let request = RemoteRequest {
-                direction: tunnel.direction,
-                kind: tunnel.kind.clone(),
-            };
+            let request = RemoteRequest::new(tunnel.direction, tunnel.kind.clone());
             let result = match &tunnel.kind {
                 RemoteKind::Tcp { .. } => {
                     tunnel_tcp_client(connection, request, Some(handle), tunnel.id).await
@@ -473,37 +470,37 @@ fn resolve_dispatch(
         ));
     }
     match (&tunnel.kind, dynamic) {
-        (RemoteKind::Tcp { local, remote }, None) => Ok(ForwardDispatch::Tcp(RemoteRequest {
-            direction: Direction::Forward,
-            kind: RemoteKind::Tcp {
+        (RemoteKind::Tcp { local, remote }, None) => Ok(ForwardDispatch::Tcp(RemoteRequest::new(
+            Direction::Forward,
+            RemoteKind::Tcp {
                 local: *local,
                 remote: remote.clone(),
             },
-        })),
-        (RemoteKind::Udp { local, remote }, None) => Ok(ForwardDispatch::Udp(RemoteRequest {
-            direction: Direction::Forward,
-            kind: RemoteKind::Udp {
+        ))),
+        (RemoteKind::Udp { local, remote }, None) => Ok(ForwardDispatch::Udp(RemoteRequest::new(
+            Direction::Forward,
+            RemoteKind::Udp {
                 local: *local,
                 remote: remote.clone(),
             },
-        })),
+        ))),
         (RemoteKind::Socks5 { local }, Some(DynamicTarget::Tcp(target))) => {
-            Ok(ForwardDispatch::Tcp(RemoteRequest {
-                direction: Direction::Forward,
-                kind: RemoteKind::Tcp {
+            Ok(ForwardDispatch::Tcp(RemoteRequest::new(
+                Direction::Forward,
+                RemoteKind::Tcp {
                     local: *local,
                     remote: target.clone(),
                 },
-            }))
+            )))
         }
         (RemoteKind::Socks5 { local }, Some(DynamicTarget::Udp(target))) => {
-            Ok(ForwardDispatch::Udp(RemoteRequest {
-                direction: Direction::Forward,
-                kind: RemoteKind::Udp {
+            Ok(ForwardDispatch::Udp(RemoteRequest::new(
+                Direction::Forward,
+                RemoteKind::Udp {
                     local: *local,
                     remote: target.clone(),
                 },
-            }))
+            )))
         }
         (RemoteKind::Socks5 { .. }, None) => Err(anyhow::anyhow!(
             "OpenConn on SOCKS5 tunnel {} requires a `dynamic` target",

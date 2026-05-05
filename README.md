@@ -119,6 +119,7 @@ Arguments:
                        [::1]:80
                        [::1]:5000:[2001:db8::1]:80
                        R:[::1]:2222:[::1]:22
+                       stdio:example.com:22
 
                    IPv6 literals must be wrapped in [brackets] (same
                    convention as URLs and ssh -L).
@@ -127,6 +128,11 @@ Arguments:
 
                    Remotes can specify "socks" in place of remote-host and remote-port.
                    The default local host and port for a "socks" remote is 127.0.0.1:1080.
+
+                   Remotes can specify "stdio" in place of <local-host>:<local-port>
+                   to pipe the client process's stdin/stdout to/from the tunnel
+                   instead of binding a local listener. Stdio remotes are
+                   forward-only.
 
 
 Options:

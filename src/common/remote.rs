@@ -98,11 +98,22 @@ impl RemoteKind {
 pub struct RemoteRequest {
     pub direction: Direction,
     pub kind: RemoteKind,
+    /// `true` when the user typed `stdio:host:port` (forward-only). The
+    /// client pipes its own stdin/stdout to/from the QUIC stream instead
+    /// of binding a local listener; the server side is unaffected (still
+    /// a normal TCP/UDP `connect` to `kind.remote`). The dummy
+    /// `kind.local` (always `0.0.0.0:0`) is never bound.
+    #[serde(default)]
+    pub stdio: bool,
 }
 
 impl RemoteRequest {
     pub fn new(direction: Direction, kind: RemoteKind) -> Self {
-        Self { direction, kind }
+        Self {
+            direction,
+            kind,
+            stdio: false,
+        }
     }
 
     /// `true` if this remote represents SOCKS5 traffic — a standalone
@@ -119,6 +130,10 @@ impl RemoteRequest {
 
     pub fn is_reversed(&self) -> bool {
         matches!(self.direction, Direction::Reverse)
+    }
+
+    pub fn is_stdio(&self) -> bool {
+        self.stdio
     }
 
     /// `local_host:local_port` as a `SocketAddr`. Use the resulting value's
@@ -154,6 +169,20 @@ impl fmt::Display for RemoteRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_reversed() {
             write!(f, "R:")?;
+        }
+        if self.stdio {
+            // stdio is always forward-only (rejected at parse time
+            // otherwise) and is forbidden with SOCKS5, so the only
+            // shapes here are Tcp/Udp.
+            return match &self.kind {
+                RemoteKind::Tcp { remote, .. } => {
+                    write!(f, "stdio=>{}/tcp", remote.to_addr_string())
+                }
+                RemoteKind::Udp { remote, .. } => {
+                    write!(f, "stdio=>{}/udp", remote.to_addr_string())
+                }
+                RemoteKind::Socks5 { .. } => write!(f, "stdio=>socks"),
+            };
         }
         match &self.kind {
             RemoteKind::Socks5 { local } => write!(f, "{}=>socks", local.port()),
@@ -242,12 +271,21 @@ impl SerdeHelper for OpenConnResponse {}
 /// request a SOCKS5 dynamic tunnel.
 const SOCKS_KEYWORD: &str = "socks";
 
+/// Marker token that replaces the local-side `host:port` to request that
+/// the client pipe its own stdin/stdout to/from the tunnel instead of
+/// binding a local listener. Forward-only — `R:stdio:...` is rejected.
+const STDIO_KEYWORD: &str = "stdio";
+
 /// Default address for things that historically defaulted to `0.0.0.0` (the
 /// IPv4 wildcard).
 const ANY_V4: &str = "0.0.0.0";
 /// Default address for SOCKS5's local listener.
 const SOCKS_DEFAULT_LOCAL: &str = "127.0.0.1";
 const SOCKS_DEFAULT_PORT: u16 = 1080;
+/// Default `remote_host` used when the user omits it in a `stdio:port`
+/// short-hand, matching chisel's behavior (`3000` resolves to
+/// `127.0.0.1:3000` on the remote side).
+const STDIO_DEFAULT_REMOTE_HOST: &str = "127.0.0.1";
 
 /// Decomposed input as a sequence of structured layers. The parser pipes the
 /// raw string through these sub-parses in order:
@@ -265,26 +303,45 @@ impl FromStr for RemoteRequest {
         let (direction, after_dir) = parse_direction(input)?;
         let (protocol_hint, body) = parse_protocol(after_dir)?;
         let tokens = split_addr_tokens(body)?;
-        let kind = tokens_to_kind(&tokens, protocol_hint)?;
-        Ok(RemoteRequest { direction, kind })
+
+        // Detect a leading `stdio` token. Stdio replaces the local
+        // listener with the client's own stdin/stdout, so it only
+        // makes sense in the *first* token slot and only on forward
+        // tunnels (the server side of a reverse tunnel can't write to
+        // the client's stdout).
+        let (stdio, addr_tokens) = if !tokens.is_empty() && tokens[0] == STDIO_KEYWORD {
+            if matches!(direction, Direction::Reverse) {
+                return Err(anyhow!("Invalid format: stdio cannot be reversed"));
+            }
+            (true, &tokens[1..])
+        } else {
+            (false, tokens.as_slice())
+        };
+
+        let kind = if stdio {
+            tokens_to_stdio_kind(addr_tokens, protocol_hint)?
+        } else {
+            tokens_to_kind(addr_tokens, protocol_hint)?
+        };
+        Ok(RemoteRequest {
+            direction,
+            kind,
+            stdio,
+        })
     }
 }
 
-/// Strip a leading `R:` / `R/` ("reverse") marker. Both forms are accepted
-/// for backwards compatibility — the chisel CLI documented the colon form;
-/// the slash form fell out of `R/protocol` parsing in earlier versions.
+/// Strip a leading `R:` ("reverse") marker. Matches chisel's syntax exactly:
+/// the colon form is the only form accepted.
 fn parse_direction(s: &str) -> Result<(Direction, &str)> {
     if let Some(rest) = s.strip_prefix("R:") {
+        if rest.is_empty() {
+            return Err(anyhow!("Invalid format: Missing details after R:"));
+        }
         return Ok((Direction::Reverse, rest));
     }
     if s == "R" {
         return Err(anyhow!("Invalid format: Missing details after R"));
-    }
-    if let Some(rest) = s.strip_prefix("R/") {
-        if rest.is_empty() {
-            return Err(anyhow!("Invalid format: Missing details after R"));
-        }
-        return Ok((Direction::Reverse, rest));
     }
     Ok((Direction::Forward, s))
 }
@@ -462,6 +519,46 @@ fn parse_four_tokens(tokens: &[&str], protocol: Option<Protocol>) -> Result<Remo
         HostPort::new(remote_host, remote_port),
         protocol,
     ))
+}
+
+/// Build a [`RemoteKind`] for a `stdio:...` declaration. The `local`
+/// `SocketAddr` is a dummy `0.0.0.0:0` — the client's stdio dispatcher
+/// never binds it. Stdio is incompatible with SOCKS5 (no `socks` keyword
+/// allowed in the remainder) since stdio is a single-conn pipe.
+fn tokens_to_stdio_kind(tokens: &[&str], protocol: Option<Protocol>) -> Result<RemoteKind> {
+    if tokens.contains(&SOCKS_KEYWORD) {
+        return Err(anyhow!(
+            "Invalid format: stdio cannot be combined with socks"
+        ));
+    }
+    let local = SocketAddr::new(any_v4(), 0);
+    match tokens.len() {
+        1 => {
+            // `stdio:<port>` — chisel defaults the omitted remote host
+            // to 127.0.0.1 (vs. 0.0.0.0 for a bare port short-hand).
+            let port = parse_port(tokens[0], "remote port")?;
+            Ok(make_host_port_kind(
+                local,
+                HostPort::new(STDIO_DEFAULT_REMOTE_HOST, port),
+                protocol,
+            ))
+        }
+        2 => {
+            let remote_host = unbracket(tokens[0]).to_string();
+            let remote_port = parse_port(tokens[1], "remote port")?;
+            Ok(make_host_port_kind(
+                local,
+                HostPort::new(remote_host, remote_port),
+                protocol,
+            ))
+        }
+        0 => Err(anyhow!(
+            "Invalid format: stdio requires a remote host:port or port"
+        )),
+        _ => Err(anyhow!(
+            "Invalid format: stdio expects '<host>:<port>' or '<port>'"
+        )),
+    }
 }
 
 fn make_host_port_kind(
@@ -735,5 +832,128 @@ mod tests {
         assert_eq!(parse("80").kind.protocol(), Some(Protocol::Tcp));
         assert_eq!(parse("80/udp").kind.protocol(), Some(Protocol::Udp));
         assert_eq!(parse("socks").kind.protocol(), None);
+    }
+
+    #[test]
+    fn rejects_r_slash_prefix() {
+        // `R/` was a Rusnel-specific shorthand; we now match chisel
+        // exactly and require the colon form.
+        let err = RemoteRequest::from_str("R/1337:google.com:80").unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_bare_r() {
+        let err = RemoteRequest::from_str("R").unwrap_err();
+        assert!(
+            err.to_string().contains("after R"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_after_reverse_prefix() {
+        let err = RemoteRequest::from_str("R:").unwrap_err();
+        assert!(
+            err.to_string().contains("after R:"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stdio_with_remote_host_port() {
+        let r = parse("stdio:example.com:22");
+        assert!(r.is_stdio());
+        assert!(!r.is_reversed());
+        let (_, remote, proto) = unwrap_hp(&r);
+        assert_eq!(remote.host, "example.com");
+        assert_eq!(remote.port, 22);
+        assert_eq!(proto, Protocol::Tcp);
+    }
+
+    #[test]
+    fn stdio_with_just_port_defaults_remote_to_loopback() {
+        // Per chisel's `stdio:80` short-hand: omitted remote host
+        // resolves to 127.0.0.1 (not 0.0.0.0).
+        let r = parse("stdio:80");
+        assert!(r.is_stdio());
+        let (_, remote, _) = unwrap_hp(&r);
+        assert_eq!(remote.host, "127.0.0.1");
+        assert_eq!(remote.port, 80);
+    }
+
+    #[test]
+    fn stdio_with_udp_protocol_suffix() {
+        let r = parse("stdio:1.1.1.1:53/udp");
+        assert!(r.is_stdio());
+        let (_, remote, proto) = unwrap_hp(&r);
+        assert_eq!(remote.host, "1.1.1.1");
+        assert_eq!(remote.port, 53);
+        assert_eq!(proto, Protocol::Udp);
+    }
+
+    #[test]
+    fn stdio_ipv6_remote() {
+        let r = parse("stdio:[2001:db8::1]:443");
+        assert!(r.is_stdio());
+        let (_, remote, _) = unwrap_hp(&r);
+        assert_eq!(remote.host, "2001:db8::1");
+        assert_eq!(remote.port, 443);
+    }
+
+    #[test]
+    fn rejects_reverse_stdio() {
+        let err = RemoteRequest::from_str("R:stdio:example.com:22").unwrap_err();
+        assert!(
+            err.to_string().contains("stdio cannot be reversed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_stdio_alone() {
+        let err = RemoteRequest::from_str("stdio").unwrap_err();
+        assert!(
+            err.to_string().contains("stdio requires"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_stdio_socks() {
+        let err = RemoteRequest::from_str("stdio:socks").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("stdio cannot be combined with socks"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stdio_round_trips_through_display() {
+        let r = parse("stdio:example.com:22");
+        assert_eq!(r.to_string(), "stdio=>example.com:22/tcp");
+        let r = parse("stdio:1.1.1.1:53/udp");
+        assert_eq!(r.to_string(), "stdio=>1.1.1.1:53/udp");
+    }
+
+    #[test]
+    fn rejects_trailing_colon() {
+        let err = RemoteRequest::from_str("1.1.1.1:").unwrap_err();
+        assert!(
+            err.to_string().contains("trailing ':'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn idn_remote_host_passes_through() {
+        let r = parse("示例網站.com:80");
+        let (_, remote, _) = unwrap_hp(&r);
+        assert_eq!(remote.host, "示例網站.com");
+        assert_eq!(remote.port, 80);
     }
 }
