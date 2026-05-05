@@ -240,10 +240,8 @@ async fn test_server_releases_reverse_socks_listener_on_client_disconnect() {
             .await
             .unwrap();
 
-        let remote = RemoteRequest::from_str(&format!(
-            "R:127.0.0.1:{reverse_listen_port}:socks"
-        ))
-        .unwrap();
+        let remote =
+            RemoteRequest::from_str(&format!("R:127.0.0.1:{reverse_listen_port}:socks")).unwrap();
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
         let hello = SessionHello {
             remotes: vec![remote],
