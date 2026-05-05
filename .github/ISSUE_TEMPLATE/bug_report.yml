@@ -1,0 +1,66 @@
+name: Bug report
+description: Something isn't working as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in as much
+        as you can — debug logs (`--debug` or
+        `RUST_LOG=rusnel=debug,quinn=info`) help a lot.
+
+        Security issues: please follow [SECURITY.md](../../SECURITY.md)
+        instead of filing here.
+  - type: input
+    id: version
+    attributes:
+      label: Rusnel version
+      description: Output of `rusnel --version`.
+      placeholder: rusnel 0.9.1
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, arch, container/bare-metal.
+      placeholder: Ubuntu 22.04 x86_64, bare metal
+    validations:
+      required: true
+  - type: textarea
+    id: server-cmd
+    attributes:
+      label: Server invocation
+      description: Redact fingerprints/keys.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: client-cmd
+    attributes:
+      label: Client invocation
+      description: Redact fingerprints/keys.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: Include any error messages.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `--debug` if possible.
+      render: text
+    validations:
+      required: false

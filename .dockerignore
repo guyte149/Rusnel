@@ -1,2 +1,10 @@
 target/
 .git/
+.github/
+benchmark/
+tests/
+*.md
+!README.md
+Dockerfile
+.dockerignore
+.gitignore

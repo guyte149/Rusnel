@@ -1,0 +1,103 @@
+# Example Rusnel configuration file.
+#
+# Usage:
+#     rusnel server --config /etc/rusnel/rusnel.toml
+#     rusnel client --config /etc/rusnel/rusnel.toml
+#
+# A single file may contain both `[server]` and `[client]` sections,
+# or just one. Only the section matching the chosen subcommand is
+# read. Unknown keys are rejected so typos surface immediately.
+#
+# Precedence: CLI flag > config file > built-in default. Any flag you
+# pass on the command line overrides whatever the file says, with one
+# wrinkle for the TLS-mode flags (--insecure / --tls-self-signed /
+# --tls-cert / --tls-key / --tls-ca on the server, and the equivalents
+# on the client): if you pass *any* TLS-mode flag on the CLI, all the
+# file's TLS-mode keys are ignored — you get exactly the mode you
+# typed. This avoids ambiguity when overriding e.g. a self-signed
+# server config with explicit cert/key paths.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+# Allow clients to declare reverse tunnels and SOCKS5 remotes. Both
+# default to false because the server should opt in to the surface
+# area it exposes.
+allow_reverse = true
+allow_socks = true
+
+# Pick exactly one TLS mode. (Comments below show all options;
+# uncomment one.)
+#
+# 1) Insecure — testing only. MITM-vulnerable.
+# insecure = true
+#
+# 2) Persisted self-signed cert. Generated on first run, reused
+#    afterwards so the fingerprint stays stable.
+tls_self_signed = true
+# tls_state_dir = "/var/lib/rusnel"
+#
+# 3) Operator-supplied cert/key (e.g. from your real PKI).
+# tls_cert = "/etc/rusnel/server.pem"
+# tls_key  = "/etc/rusnel/server.key"
+#
+# 4) mTLS — adds tls_ca on top of cert/key.
+# tls_ca   = "/etc/rusnel/ca.pem"
+
+# QUIC congestion controller: "cubic" (default) or "bbr".
+congestion = "cubic"
+
+# Cap on concurrent client connections. 0 = uncapped.
+max_connections = 0
+
+# Admin HTTP API socket (queryable with `rusnel ctl`). Comment the
+# next line out and uncomment `no_admin_socket` to disable the API.
+# admin_socket = "/run/rusnel/admin.sock"
+# no_admin_socket = true
+
+# Logging
+log_format = "compact"   # or "json" for log-aggregator-friendly output
+# verbose = true          # rusnel modules at DEBUG
+# debug   = true          # rusnel modules at TRACE
+# quiet   = true          # WARN-and-above only
+
+
+[client]
+server  = "tunnel.example.com:8080"
+
+# Each entry is the same string you'd pass as a positional <remote>.
+# See `rusnel client --help` for the grammar.
+remotes = [
+    "R:2222:localhost:22",
+    "1.1.1.1:53/udp",
+    "R:socks",
+]
+
+# Pick exactly one TLS mode for the client.
+#
+# 1) Pin the server cert by SHA-256 fingerprint (ssh-style).
+tls_fingerprint = "sha256:0123456789abcdef..."
+#
+# 2) Verify the server cert against a CA bundle.
+# tls_ca = "/etc/rusnel/ca.pem"
+#
+# 3) Add client cert + key for mTLS (in addition to tls_ca).
+# tls_cert = "/etc/rusnel/client.pem"
+# tls_key  = "/etc/rusnel/client.key"
+#
+# 4) Override the SNI / verification name (rarely needed).
+# tls_server_name = "tunnel.example.com"
+
+congestion = "cubic"
+
+# Reconnect behaviour. The client uses exponential backoff; the
+# initial backoff is fixed at 200 ms and doubles up to
+# `max_retry_interval` seconds.
+max_retry_count    = -1     # -1 = retry forever
+max_retry_interval = 300
+
+# Route the QUIC connection through a SOCKS5 proxy via UDP ASSOCIATE.
+# proxy = "socks5://user:pass@proxy.example.com:1080"
+
+log_format = "compact"
