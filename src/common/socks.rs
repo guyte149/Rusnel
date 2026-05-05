@@ -9,7 +9,7 @@ use quinn::{Connection, RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
-use tracing::{debug, debug_span, error, info, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::remote::{DynamicTarget, HostPort, OpenConn, RemoteRequest};
 use super::tcp::{tunnel_tcp_stream, Counters, TunnelHandleOpt};
@@ -39,87 +39,109 @@ pub async fn tunnel_socks_client(
 ) -> Result<()> {
     let local_addr = remote.local_socket_addr();
     let listener = TcpListener::bind(local_addr).await?;
-    info!("SOCKS5 listening on {}", local_addr);
+    info!(addr = %local_addr, proto = "socks5", "listening");
 
-    let conn_counter = AtomicUsize::new(0);
+    let local_counter = AtomicUsize::new(0);
 
     loop {
-        let (mut local_conn, peer_addr) = listener.accept().await?;
+        let (mut local_conn, peer) = listener.accept().await?;
         let connection = quic_connection.clone();
         let remote = remote.clone();
         let tunnel_handle = handle.clone();
-        let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let span = debug_span!("conn", id = conn_id, peer = %peer_addr);
+        let local_id = (local_counter.fetch_add(1, Ordering::Relaxed) + 1) as u64;
 
         // Fire-and-forget: each accepted SOCKS5 connection runs to completion
         // in its own task so the accept loop never blocks on a slow handshake
         // (regression of #20 §1).
-        tokio::spawn(
-            async move {
-                let request = match socks_handshake(&mut local_conn).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        error!("handshake error: {}", e);
-                        return;
-                    }
-                };
+        tokio::spawn(async move {
+            let request = match socks_handshake(&mut local_conn).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let span = info_span!("socks5", peer = %peer);
+                    let _g = span.enter();
+                    warn!(error = %e, "handshake failed");
+                    return;
+                }
+            };
 
-                match request {
-                    SocksRequest::Connect(target) => {
-                        debug!(target = %target, "SOCKS5 CONNECT");
-
-                        let (send, recv) = match connection.open_bi().await {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                error!("failed to open stream: {}", e);
-                                return;
-                            }
-                        };
-
-                        // One admin conn per SOCKS CONNECT, labelled
-                        // with the SOCKS client's source plus the target
-                        // it asked for so operators can spot which CONNECT
-                        // is blocking on what.
-                        let _conn_guard = tunnel_handle
-                            .as_ref()
-                            .map(|h| h.open_conn(Some(format!("{peer_addr}=>{target}"))));
-                        if let Some(g) = _conn_guard.as_ref() {
-                            info!(
-                                conn_id = g.id(),
-                                peer = %peer_addr,
-                                target = %target,
-                                "conn opened"
-                            );
+            match request {
+                SocksRequest::Connect(target) => {
+                    let (send, recv) = match connection.open_bi().await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            let span = info_span!("socks5", peer = %peer);
+                            let _g = span.enter();
+                            error!(error = %e, "failed to open quic stream");
+                            return;
                         }
-                        let counters = _conn_guard.as_ref().map(|g| g.counters());
+                    };
 
-                        if let Err(e) = start_client_dynamic_tunnel(
-                            local_conn, send, recv, tunnel_id, target, counters,
+                    // One admin conn per SOCKS CONNECT, labelled
+                    // with the SOCKS client's source plus the target
+                    // it asked for so operators can spot which CONNECT
+                    // is blocking on what.
+                    let conn_guard = tunnel_handle
+                        .as_ref()
+                        .map(|h| h.open_conn(Some(format!("{peer}=>{target}"))));
+                    let conn_id = conn_guard.as_ref().map(|g| g.id()).unwrap_or(local_id);
+                    let counters = conn_guard.as_ref().map(|g| g.counters());
+
+                    let span = info_span!(
+                        "conn",
+                        conn_id,
+                        tunnel_id,
+                        peer = %peer,
+                        target = %target,
+                        proto = "socks5/tcp",
+                    );
+                    async move {
+                        info!("conn opened");
+                        let started = std::time::Instant::now();
+                        let result = start_client_dynamic_tunnel(
+                            local_conn,
+                            send,
+                            recv,
+                            tunnel_id,
+                            target,
+                            counters.clone(),
                         )
-                        .await
-                        {
-                            error!("dynamic tunnel error: {}", e);
+                        .await;
+                        let dur_ms = started.elapsed().as_millis() as u64;
+                        let snap = counters.as_ref().map(|c| c.snapshot());
+                        match (&result, snap) {
+                            (Ok(()), Some((bytes_in, bytes_out))) => {
+                                info!(bytes_in, bytes_out, dur_ms, "conn closed")
+                            }
+                            (Ok(()), None) => info!(dur_ms, "conn closed"),
+                            (Err(e), _) => warn!(dur_ms, error = %e, "conn closed (error)"),
                         }
+                        drop(conn_guard);
                     }
-                    SocksRequest::UdpAssociate => {
-                        debug!("SOCKS5 UDP ASSOCIATE");
+                    .instrument(span)
+                    .await;
+                }
+                SocksRequest::UdpAssociate => {
+                    let span = info_span!("socks5-udp", peer = %peer);
+                    async move {
+                        debug!("UDP ASSOCIATE requested");
                         if let Err(e) = handle_socks_udp_associate(
                             connection,
                             local_conn,
                             &remote,
                             tunnel_handle,
-                            peer_addr,
+                            peer,
                             tunnel_id,
                         )
                         .await
                         {
-                            error!("UDP ASSOCIATE error: {}", e);
+                            error!(error = %e, "UDP ASSOCIATE failed");
                         }
                     }
+                    .instrument(span)
+                    .await;
                 }
             }
-            .instrument(span),
-        );
+        });
     }
 }
 
@@ -266,7 +288,7 @@ async fn handle_socks_udp_associate(
     let bind_addr = SocketAddr::new(listen_ip, 0);
     let udp_socket = Arc::new(UdpSocket::bind(bind_addr).await?);
     let bound = udp_socket.local_addr()?;
-    debug!(udp = %bound, "SOCKS5 UDP relay bound");
+    debug!(addr = %bound, "UDP ASSOCIATE relay bound");
 
     write_socks_udp_associate_reply(&mut tcp_conn, bound).await?;
 
@@ -279,7 +301,7 @@ async fn handle_socks_udp_associate(
             if let Err(e) =
                 run_socks_udp_relay(connection, tunnel_id, socket, handle, socks_peer).await
             {
-                debug!("UDP ASSOCIATE relay ended: {}", e);
+                debug!(error = %e, "UDP relay ended");
             }
         }
     });
@@ -294,7 +316,7 @@ async fn handle_socks_udp_associate(
         }
     }
     relay_handle.abort();
-    debug!("SOCKS5 UDP ASSOCIATE control connection closed");
+    debug!("UDP ASSOCIATE control closed");
     Ok(())
 }
 
@@ -341,7 +363,7 @@ async fn run_socks_udp_relay(
         let (target, payload) = match parse_socks_udp_header(&buf[..n]) {
             Ok(v) => v,
             Err(e) => {
-                debug!(peer = %src, "invalid SOCKS5 UDP datagram: {}", e);
+                debug!(peer = %src, error = %e, "invalid UDP datagram");
                 continue;
             }
         };
@@ -377,7 +399,7 @@ async fn run_socks_udp_relay(
         // UDP is unreliable: drop on backpressure or after the conn
         // terminated rather than blocking the receive loop.
         if let Err(e) = tx.try_send(Bytes::copy_from_slice(payload)) {
-            debug!(peer = %src, target = %target, "dropping UDP datagram: {}", e);
+            debug!(peer = %src, target = %target, error = %e, "dropping udp datagram");
         }
     }
 }
@@ -396,37 +418,49 @@ fn spawn_socks_udp_conn(
 ) {
     let key = (source, target.clone());
     tokio::spawn(async move {
-        debug!(peer = %source, target = %target, "opening SOCKS5 UDP conn");
         // One admin conn per (SOCKS-source, UDP-target) pair so the
         // operator can spot a single greedy target over a shared
         // SOCKS UDP association.
-        let _conn_guard = handle
+        let conn_guard = handle
             .as_ref()
             .map(|h| h.open_conn(Some(format!("{socks_peer}=>{target}"))));
-        if let Some(g) = _conn_guard.as_ref() {
-            info!(
-                conn_id = g.id(),
-                peer = %socks_peer,
-                target = %target,
-                "conn opened"
-            );
-        }
-        let counters = _conn_guard.as_ref().map(|g| g.counters());
-        if let Err(e) = run_socks_udp_conn(
-            quic_connection,
+        let conn_id = conn_guard.as_ref().map(|g| g.id()).unwrap_or(0);
+        let counters = conn_guard.as_ref().map(|g| g.counters());
+        let span = info_span!(
+            "conn",
+            conn_id,
             tunnel_id,
-            udp_socket,
-            source,
-            target,
-            rx,
-            counters,
-        )
-        .await
-        {
-            warn!(peer = %source, "SOCKS5 UDP conn ended: {}", e);
+            peer = %socks_peer,
+            target = %target,
+            proto = "socks5/udp",
+        );
+        async move {
+            info!("conn opened");
+            let started = std::time::Instant::now();
+            let result = run_socks_udp_conn(
+                quic_connection,
+                tunnel_id,
+                udp_socket,
+                source,
+                target,
+                rx,
+                counters.clone(),
+            )
+            .await;
+            let dur_ms = started.elapsed().as_millis() as u64;
+            let snap = counters.as_ref().map(|c| c.snapshot());
+            match (&result, snap) {
+                (Ok(()), Some((bytes_in, bytes_out))) => {
+                    info!(bytes_in, bytes_out, dur_ms, "conn closed")
+                }
+                (Ok(()), None) => info!(dur_ms, "conn closed"),
+                (Err(e), _) => warn!(dur_ms, error = %e, "conn closed (error)"),
+            }
         }
+        .instrument(span)
+        .await;
+        drop(conn_guard);
         conns.remove(&key);
-        debug!(peer = %key.0, target = %key.1, "SOCKS5 UDP conn removed");
     });
 }
 
@@ -470,7 +504,7 @@ async fn run_socks_udp_conn(
                 }
                 Ok(None) => return Ok::<(), anyhow::Error>(()),
                 Err(_) => {
-                    debug!(peer = %source, target = %target, "SOCKS5 UDP conn idle timeout");
+                    debug!("idle timeout");
                     return Ok(());
                 }
             }

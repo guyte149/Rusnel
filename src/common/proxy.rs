@@ -231,8 +231,8 @@ async fn establish_socks5_udp_associate(
             let mut name = vec![0u8; len_buf[0] as usize];
             tcp.read_exact(&mut name).await?;
             warn!(
-                "SOCKS5 proxy returned domain BND.ADDR `{}`; using proxy peer IP instead",
-                String::from_utf8_lossy(&name)
+                bnd_addr = %String::from_utf8_lossy(&name),
+                "SOCKS5 proxy returned domain BND.ADDR; falling back to proxy peer IP",
             );
             tcp.peer_addr()?.ip()
         }
@@ -494,22 +494,16 @@ impl AsyncUdpSocket for Socks5UdpSocket {
                         // A datagram from somewhere other than the proxy's
                         // relay endpoint — skip it. Most likely a stray
                         // packet from a previous association, or a probe.
-                        debug!(
-                            "ignoring unexpected datagram from {} on SOCKS5-proxied socket",
-                            src
-                        );
+                        debug!(from = %src, "ignoring unexpected datagram on socks5-proxied socket");
                         continue;
                     }
                     let used = &mut buf[..n];
                     let Some((inner_src, payload_len)) = unwrap_socks5_udp_in_place(used) else {
-                        debug!("dropping malformed SOCKS5 UDP datagram (len={n})");
+                        debug!(len = n, "dropping malformed socks5 udp datagram");
                         continue;
                     };
                     if inner_src != self.target {
-                        debug!(
-                            "ignoring SOCKS5 datagram with inner src {} (expected {})",
-                            inner_src, self.target
-                        );
+                        debug!(inner_src = %inner_src, expected = %self.target, "ignoring socks5 datagram with mismatched inner src");
                         continue;
                     }
                     meta[0] = quinn::udp::RecvMeta {
@@ -572,12 +566,12 @@ impl TcpKeepalive {
             loop {
                 match read.read(&mut sink).await {
                     Ok(0) => {
-                        debug!("SOCKS5 proxy closed the control TCP connection");
+                        debug!("socks5 proxy closed control tcp");
                         break;
                     }
-                    Ok(n) => debug!("SOCKS5 proxy sent {n} unexpected bytes on control channel"),
+                    Ok(n) => debug!(bytes = n, "socks5 proxy sent unexpected bytes on control"),
                     Err(e) => {
-                        debug!("SOCKS5 control TCP read error: {e}");
+                        debug!(error = %e, "socks5 control tcp read error");
                         break;
                     }
                 }

@@ -8,7 +8,7 @@ use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::common::remote::OpenConn;
 use crate::common::tcp::{Counters, TunnelHandleOpt};
@@ -94,10 +94,10 @@ pub async fn tunnel_udp_stream(
         pump_stream_to_socket(udp_socket, udp_address, recv_channel, counters),
     );
     if let Err(e) = l2q {
-        debug!("local→quic error: {}", e);
+        debug!(direction = "tx", error = %e, "udp pump error");
     }
     if let Err(e) = q2l {
-        debug!("quic→local error: {}", e);
+        debug!(direction = "rx", error = %e, "udp pump error");
     }
     Ok(())
 }
@@ -116,7 +116,7 @@ async fn pump_socket_to_stream(
     loop {
         let (len, received_addr) = udp_socket.recv_from(&mut buf).await?;
         if received_addr != udp_address {
-            debug!(peer = %received_addr, expected = %udp_address, "dropping datagram from unexpected source");
+            debug!(from = %received_addr, expected = %udp_address, "dropping unexpected udp source");
             continue;
         }
         write_datagram(&mut send, &buf[..len]).await?;
@@ -157,7 +157,7 @@ pub async fn tunnel_udp_client(
     let listen_addr = remote.local_socket_addr();
     let udp_socket = Arc::new(UdpSocket::bind(listen_addr).await?);
 
-    info!("listening on {}", listen_addr);
+    info!(addr = %listen_addr, proto = "udp", "listening");
 
     // DashMap (sharded RwLock) replaces a single global Mutex<HashMap> so the
     // per-source lookup on every received datagram doesn't serialize the
@@ -211,7 +211,7 @@ pub async fn tunnel_udp_client(
         // UDP is unreliable — if the conn is backpressured or has already
         // terminated, dropping the packet is correct.
         if let Err(e) = sender.try_send(payload) {
-            debug!(peer = %src, "dropping UDP datagram: {}", e);
+            debug!(peer = %src, error = %e, "dropping udp datagram");
         }
     }
 }
@@ -227,23 +227,43 @@ fn spawn_udp_conn(
     tunnel_id: u64,
 ) {
     tokio::spawn(async move {
-        debug!(peer = %source, "opening UDP conn");
         // Per-source UDP aggregator → one admin-side conn, scoped to
         // the lifetime of the spawn.
-        let _conn_guard = handle
+        let conn_guard = handle
             .as_ref()
             .map(|h| h.open_conn(Some(source.to_string())));
-        if let Some(g) = _conn_guard.as_ref() {
-            info!(conn_id = g.id(), peer = %source, "conn opened");
+        let conn_id = conn_guard.as_ref().map(|g| g.id()).unwrap_or(0);
+        let counters = conn_guard.as_ref().map(|g| g.counters());
+        let span = info_span!("conn", conn_id, tunnel_id, peer = %source, proto = "udp");
+        async move {
+            info!("conn opened");
+            let started = std::time::Instant::now();
+            let result = run_udp_conn(
+                quic_connection,
+                tunnel_id,
+                udp_socket,
+                source,
+                rx,
+                counters.clone(),
+            )
+            .await;
+            let dur_ms = started.elapsed().as_millis() as u64;
+            let snap = counters.as_ref().map(|c| c.snapshot());
+            match (&result, snap) {
+                (Ok(()), Some((bytes_in, bytes_out))) => {
+                    info!(bytes_in, bytes_out, dur_ms, "conn closed")
+                }
+                (Ok(()), None) => info!(dur_ms, "conn closed"),
+                (Err(e), Some((bytes_in, bytes_out))) => {
+                    warn!(bytes_in, bytes_out, dur_ms, error = %e, "conn closed (error)")
+                }
+                (Err(e), None) => warn!(dur_ms, error = %e, "conn closed (error)"),
+            }
         }
-        let counters = _conn_guard.as_ref().map(|g| g.counters());
-        if let Err(e) =
-            run_udp_conn(quic_connection, tunnel_id, udp_socket, source, rx, counters).await
-        {
-            warn!(peer = %source, "UDP conn ended: {}", e);
-        }
+        .instrument(span)
+        .await;
+        drop(conn_guard);
         conns.remove(&source);
-        debug!(peer = %source, "UDP conn removed");
     });
 }
 
@@ -279,7 +299,7 @@ async fn run_udp_conn(
                 }
                 Ok(None) => return Ok::<(), anyhow::Error>(()), // sender side closed
                 Err(_) => {
-                    debug!(peer = %source, "UDP conn idle timeout");
+                    debug!("idle timeout");
                     return Ok(());
                 }
             }
@@ -329,7 +349,7 @@ pub async fn tunnel_udp_server(
     };
     let udp_socket = Arc::new(UdpSocket::bind(bind_addr).await?);
 
-    debug!("connecting to {}", remote_addr);
+    debug!(target = %remote_addr, "udp dial");
 
     tunnel_udp_stream(
         udp_socket,

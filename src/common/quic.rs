@@ -166,7 +166,7 @@ fn load_server_identity(
 
     if let Some(leaf) = cert_chain.first() {
         let fp = format_fingerprint(&cert_sha256(leaf));
-        info!("server cert fingerprint: {fp}");
+        info!(fingerprint = %fp, "server cert");
     }
 
     Ok((cert_chain, key))
@@ -182,17 +182,11 @@ fn load_or_create_self_signed(
     let key_path = state_dir.join("server.key");
 
     if cert_path.exists() && key_path.exists() {
-        debug!(
-            "loading persisted self-signed identity from {}",
-            state_dir.display()
-        );
+        debug!(dir = %state_dir.display(), "loading persisted self-signed identity");
         return load_pem_identity(&cert_path, &key_path);
     }
 
-    info!(
-        "no persisted server identity found in {}; generating a new self-signed cert",
-        state_dir.display()
-    );
+    info!(dir = %state_dir.display(), "generating new self-signed identity");
     fs::create_dir_all(state_dir)
         .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
 
@@ -206,9 +200,9 @@ fn load_or_create_self_signed(
     write_secret_file(&key_path, key_pem.as_bytes())
         .with_context(|| format!("failed to write {}", key_path.display()))?;
     info!(
-        "persisted server identity to {} and {}",
-        cert_path.display(),
-        key_path.display()
+        cert = %cert_path.display(),
+        key = %key_path.display(),
+        "persisted server identity",
     );
 
     let cert_der: CertificateDer<'static> = generated.cert.into();
@@ -262,7 +256,7 @@ fn load_root_store(ca_path: &Path) -> Result<rustls::RootCertStore> {
         })?;
         added += 1;
     }
-    debug!("loaded {added} CA cert(s) from {}", ca_path.display());
+    debug!(count = added, path = %ca_path.display(), "loaded CA certs");
     Ok(roots)
 }
 
@@ -292,10 +286,7 @@ fn build_quic_server_config(
             .with_no_client_auth()
             .with_single_cert(cert, key)?,
         ServerTlsConfig::Mtls { ca, .. } => {
-            info!(
-                "mTLS enabled: requiring client certificates signed by {}",
-                ca.display()
-            );
+            info!(ca = %ca.display(), "mTLS enabled (requiring client cert)");
             let roots = load_root_store(ca)?;
             let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
                 .build()
@@ -338,10 +329,7 @@ fn build_quic_client_config(tls: &ClientTlsConfig) -> Result<ClientConfig> {
             let roots = load_root_store(ca)?;
             let (cert_chain, key) = load_pem_identity(cert, key)?;
             if let Some(leaf) = cert_chain.first() {
-                debug!(
-                    "client cert fingerprint: {}",
-                    format_fingerprint(&cert_sha256(leaf))
-                );
+                debug!(fingerprint = %format_fingerprint(&cert_sha256(leaf)), "client cert");
             }
             TlsClientConfig::builder()
                 .with_root_certificates(roots)
@@ -486,9 +474,9 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             warn!(
-                "server cert fingerprint mismatch: expected {}, got {}",
-                format_fingerprint(&self.expected),
-                format_fingerprint(&actual),
+                expected = %format_fingerprint(&self.expected),
+                actual = %format_fingerprint(&actual),
+                "server cert fingerprint mismatch",
             );
             Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::ApplicationVerificationFailure,

@@ -8,7 +8,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::Notify,
 };
-use tracing::{debug, debug_span, info, Instrument};
+use tracing::{debug, info, info_span, Instrument};
 
 use crate::common::counted::{CountedReader, TunnelCounters};
 use crate::common::remote::OpenConn;
@@ -73,7 +73,7 @@ pub async fn tunnel_tcp_stream(
     // tunneled TCP — forward, reverse, and SOCKS — flows through here, so
     // this single call covers every path.
     if let Err(e) = tcp_stream.set_nodelay(true) {
-        debug!("set_nodelay failed: {}", e);
+        debug!(error = %e, "set_nodelay failed");
     }
 
     let (tcp_recv, mut tcp_send) = tcp_stream.into_split();
@@ -198,9 +198,9 @@ pub async fn tunnel_tcp_stream(
     // it as a leak.
     let (c2s, s2c) = tokio::join!(client_to_server, server_to_client);
     match (&c2s, &s2c) {
-        (Ok(_), Ok(_)) => debug!("closed"),
-        (Err(e), _) => debug!("client→server error: {}", e),
-        (_, Err(e)) => debug!("server→client error: {}", e),
+        (Ok(_), Ok(_)) => debug!("stream closed"),
+        (Err(e), _) => debug!(direction = "tx", error = %e, "stream copy error"),
+        (_, Err(e)) => debug!(direction = "rx", error = %e, "stream copy error"),
     }
     Ok(())
 }
@@ -239,7 +239,7 @@ pub async fn tunnel_stdio_client(quic_connection: Connection, tunnel_id: u64) ->
         &mut recv,
     )
     .await?;
-    info!("stdio tunnel ready (piping stdin/stdout)");
+    info!("stdio tunnel ready");
 
     let mut stdin = BufReader::with_capacity(TUNNEL_COPY_BUF, tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
@@ -305,8 +305,8 @@ pub async fn tunnel_stdio_client(quic_connection: Connection, tunnel_id: u64) ->
     let (s2q, q2s) = tokio::join!(stdin_to_quic, quic_to_stdout);
     match (&s2q, &q2s) {
         (Ok(_), Ok(_)) => debug!("stdio tunnel closed"),
-        (Err(e), _) => debug!("stdin→quic error: {}", e),
-        (_, Err(e)) => debug!("quic→stdout error: {}", e),
+        (Err(e), _) => debug!(direction = "tx", error = %e, "stdio copy error"),
+        (_, Err(e)) => debug!(direction = "rx", error = %e, "stdio copy error"),
     }
     Ok(())
 }
@@ -322,51 +322,80 @@ pub async fn tunnel_tcp_client(
     // `IpAddr` produces `::1:8080`, which `TcpListener::bind` rejects.
     let local_addr = remote.local_socket_addr();
     let listener = TcpListener::bind(local_addr).await?;
-    info!("listening on {}", local_addr);
+    info!(addr = %local_addr, "listening");
 
-    let conn_counter = AtomicUsize::new(0);
+    // Local fallback counter for log-only correlation when admin
+    // tracking is disabled (handle is None, i.e. forward client side).
+    let local_counter = AtomicUsize::new(0);
 
     loop {
-        let (local_socket, addr) = listener.accept().await?;
-        let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let span = debug_span!("conn", id = conn_id, peer = %addr);
-
+        let (local_socket, peer) = listener.accept().await?;
         let connection = quic_connection.clone();
         let handle = handle.clone();
-        tokio::spawn(
-            async move {
-                debug!("open");
-                let (mut send, mut recv) = connection.open_bi().await?;
+        let local_id = (local_counter.fetch_add(1, Ordering::Relaxed) + 1) as u64;
 
-                // Tell the peer which tunnel this stream belongs to.
-                // Static TCP tunnels carry no `dynamic` payload — the
-                // peer already knows the target from the tunnel's
-                // declaration in the session hello.
-                send_open_conn(
-                    &OpenConn {
-                        tunnel_id,
-                        dynamic: None,
-                    },
-                    &mut send,
-                    &mut recv,
-                )
-                .await?;
-
-                // Register this accepted connection as a conn against
-                // the parent tunnel (when admin tracking is enabled).
-                // The `ConnGuard` removes it again on drop, regardless
-                // of how the stream below ends.
-                let _conn_guard = handle.as_ref().map(|h| h.open_conn(Some(addr.to_string())));
-                if let Some(g) = _conn_guard.as_ref() {
-                    info!(conn_id = g.id(), peer = %addr, "conn opened");
+        tokio::spawn(async move {
+            let (mut send, mut recv) = match connection.open_bi().await {
+                Ok(s) => s,
+                Err(e) => {
+                    let span = info_span!("conn", conn_id = local_id, tunnel_id, peer = %peer);
+                    let _g = span.enter();
+                    debug!(error = %e, "open_bi failed");
+                    return Err::<(), anyhow::Error>(e.into());
                 }
-                let counters = _conn_guard.as_ref().map(|g| g.counters());
+            };
 
-                tunnel_tcp_stream(local_socket, send, recv, counters).await?;
-                Ok::<(), anyhow::Error>(())
+            // Tell the peer which tunnel this stream belongs to.
+            // Static TCP tunnels carry no `dynamic` payload — the
+            // peer already knows the target from the tunnel's
+            // declaration in the session hello.
+            if let Err(e) = send_open_conn(
+                &OpenConn {
+                    tunnel_id,
+                    dynamic: None,
+                },
+                &mut send,
+                &mut recv,
+            )
+            .await
+            {
+                let span = info_span!("conn", conn_id = local_id, tunnel_id, peer = %peer);
+                let _g = span.enter();
+                debug!(error = %e, "OpenConn rejected");
+                return Err(e);
             }
-            .instrument(span),
-        );
+
+            // Register this accepted connection as a conn against
+            // the parent tunnel (when admin tracking is enabled).
+            // The `ConnGuard` removes it again on drop, regardless
+            // of how the stream below ends.
+            let conn_guard = handle.as_ref().map(|h| h.open_conn(Some(peer.to_string())));
+            let conn_id = conn_guard.as_ref().map(|g| g.id()).unwrap_or(local_id);
+            let counters = conn_guard.as_ref().map(|g| g.counters());
+
+            let span = info_span!("conn", conn_id, tunnel_id, peer = %peer);
+            async move {
+                info!("conn opened");
+                let started = std::time::Instant::now();
+                let result = tunnel_tcp_stream(local_socket, send, recv, counters.clone()).await;
+                let dur_ms = started.elapsed().as_millis() as u64;
+                let snap = counters.as_ref().map(|c| c.snapshot());
+                match (&result, snap) {
+                    (Ok(()), Some((bytes_in, bytes_out))) => {
+                        info!(bytes_in, bytes_out, dur_ms, "conn closed")
+                    }
+                    (Ok(()), None) => info!(dur_ms, "conn closed"),
+                    (Err(e), Some((bytes_in, bytes_out))) => {
+                        debug!(bytes_in, bytes_out, dur_ms, error = %e, "conn closed (error)")
+                    }
+                    (Err(e), None) => debug!(dur_ms, error = %e, "conn closed (error)"),
+                }
+                drop(conn_guard);
+                result
+            }
+            .instrument(span)
+            .await
+        });
     }
 }
 
@@ -379,9 +408,9 @@ pub async fn tunnel_tcp_server(
     let remote_addr = request
         .remote_addr_string()
         .ok_or_else(|| anyhow::anyhow!("TCP server tunnel requires a host:port remote"))?;
-    debug!("connecting to {}", remote_addr);
+    debug!(target = %remote_addr, "dialing");
     let tcp_stream = TcpStream::connect(&remote_addr).await?;
-    debug!("connected to {}", remote_addr);
+    debug!(target = %remote_addr, "dialed");
 
     tunnel_tcp_stream(tcp_stream, send_channel, recv_channel, counters).await?;
 

@@ -42,6 +42,16 @@ use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, info};
 
+/// Output format for the log subscriber. `compact` is the default —
+/// human-friendly, ANSI-coloured when stderr is a TTY. `json` emits one
+/// JSON object per event for ingestion by log aggregators.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum LogFormat {
+    #[default]
+    Compact,
+    Json,
+}
+
 /// Parse a non-negative integer number of seconds into a [`Duration`].
 fn parse_duration_secs(s: &str) -> Result<Duration, String> {
     let secs: u64 = s
@@ -259,13 +269,21 @@ enum Mode {
         #[arg(long, default_value_t = false)]
         no_admin_socket: bool,
 
-        /// enable verbose logging
+        /// enable verbose logging (rusnel modules at debug level)
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
 
-        /// enable debug logging
+        /// enable debug logging (rusnel modules at trace level)
         #[arg(long("debug"), default_value_t = false)]
         is_debug: bool,
+
+        /// suppress informational logs (warn-and-above only)
+        #[arg(short('q'), long("quiet"), default_value_t = false, conflicts_with_all = ["is_verbose", "is_debug"])]
+        is_quiet: bool,
+
+        /// log output format
+        #[arg(long, value_enum, default_value_t = LogFormat::Compact, value_name = "FORMAT")]
+        log_format: LogFormat,
     },
     /// run Rusnel in client mode
     ///
@@ -398,13 +416,21 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
         #[arg(long, value_name = "URL", value_parser = parse_proxy)]
         proxy: Option<ProxyConfig>,
 
-        /// enable verbose logging
+        /// enable verbose logging (rusnel modules at debug level)
         #[arg(short('v'), long("verbose"), default_value_t = false)]
         is_verbose: bool,
 
-        /// enable debug logging
+        /// enable debug logging (rusnel modules at trace level)
         #[arg(long("debug"), default_value_t = false)]
         is_debug: bool,
+
+        /// suppress informational logs (warn-and-above only)
+        #[arg(short('q'), long("quiet"), default_value_t = false, conflicts_with_all = ["is_verbose", "is_debug"])]
+        is_quiet: bool,
+
+        /// log output format
+        #[arg(long, value_enum, default_value_t = LogFormat::Compact, value_name = "FORMAT")]
+        log_format: LogFormat,
     },
     /// generate certificates for use with --tls-* flags
     Cert {
@@ -709,8 +735,15 @@ fn main() {
             no_admin_socket,
             is_verbose,
             is_debug,
+            is_quiet,
+            log_format,
         } => {
-            set_log_level(is_verbose, is_debug);
+            init_logging(LoggingOpts {
+                verbose: is_verbose,
+                debug: is_debug,
+                quiet: is_quiet,
+                format: log_format,
+            });
 
             let embedded = match embedded::materialize() {
                 Ok(m) => m,
@@ -757,7 +790,7 @@ fn main() {
                     Some(admin_socket.unwrap_or_else(rusnel::ctl::default_socket_path))
                 },
             };
-            debug!("Initialized server with config: {:?}", server_config);
+            debug!(?server_config, "server config resolved");
             run_server(server_config);
         }
         Mode::Client {
@@ -775,8 +808,15 @@ fn main() {
             proxy,
             is_verbose,
             is_debug,
+            is_quiet,
+            log_format,
         } => {
-            set_log_level(is_verbose, is_debug);
+            init_logging(LoggingOpts {
+                verbose: is_verbose,
+                debug: is_debug,
+                quiet: is_quiet,
+                format: log_format,
+            });
 
             let embedded = match embedded::materialize() {
                 Ok(m) => m,
@@ -818,7 +858,7 @@ fn main() {
                 reconnect,
                 proxy,
             };
-            debug!("Initialized client with config: {:?}", client_config);
+            debug!(?client_config, "client config resolved");
             run_client(client_config);
         }
         Mode::Ctl {
@@ -828,12 +868,7 @@ fn main() {
         } => {
             // ctl is a one-shot client; minimal logger so error messages
             // surface but we don't pollute the formatted-table output.
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::WARN)
-                .with_target(false)
-                .without_time()
-                .with_writer(std::io::stderr)
-                .init();
+            init_simple_logger("rusnel=warn,warn");
             let socket_path = socket.unwrap_or_else(rusnel::ctl::default_socket_path);
             if let Err(e) = run_ctl(&socket_path, json, action) {
                 eprintln!("ctl: {}", rusnel::ctl::flatten_error(e));
@@ -843,12 +878,7 @@ fn main() {
         Mode::Cert { action } => {
             // Cert generation is a one-shot tool, not a server. Use a minimal
             // INFO logger so file paths are visible without --verbose.
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::INFO)
-                .with_target(false)
-                .without_time()
-                .with_writer(std::io::stderr)
-                .init();
+            init_simple_logger("rusnel=info,warn");
             if let Err(e) = run_cert(action) {
                 Args::command()
                     .error(ErrorKind::Io, format!("{e:#}"))
@@ -981,22 +1011,80 @@ mod tests {
     }
 }
 
-fn set_log_level(is_verbose: bool, is_debug: bool) {
-    let log_level = if is_debug {
-        tracing::Level::TRACE
-    } else if is_verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
-    // Log to stderr, not stdout. CLI-tool convention, and a hard
-    // requirement for forward `stdio:` remotes — those pipe the
-    // process's stdout to the tunnel, so any byte we emit on stdout
-    // becomes part of the data stream and corrupts the peer's view.
+/// Minimal subscriber for one-shot subcommands (`ctl`, `cert`). No
+/// timestamps — these tools print to a TTY where the wall-clock is the user's
+/// own session, and a leading timestamp on every line is just noise.
+fn init_simple_logger(default_directive: &'static str) {
+    use tracing_subscriber::EnvFilter;
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directive));
     tracing_subscriber::fmt()
-        .with_max_level(log_level)
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
         .with_writer(std::io::stderr)
         .init();
+}
 
-    debug!("log level: {}", log_level);
+struct LoggingOpts {
+    verbose: bool,
+    debug: bool,
+    quiet: bool,
+    format: LogFormat,
+}
+
+/// Install the global tracing subscriber.
+///
+/// Filter resolution: `RUST_LOG` (if set) wins, otherwise we synthesize a
+/// directive from `--verbose` / `--debug` / `--quiet`. The synthesized
+/// directives keep noisy upstream crates (quinn, rustls) at WARN by default
+/// so the operator's own logs don't get drowned out — set
+/// `RUST_LOG=rusnel=debug,quinn=info` (or any other directive) to override.
+///
+/// Output goes to stderr (CLI convention; also a hard requirement for
+/// forward `stdio:` remotes which pipe the process's stdout to the tunnel).
+/// ANSI colours are auto-detected from the stderr TTY-ness.
+fn init_logging(opts: LoggingOpts) {
+    use std::io::IsTerminal;
+    use time::macros::format_description;
+    use tracing_subscriber::fmt::time::UtcTime;
+    use tracing_subscriber::EnvFilter;
+
+    // Synthesized default — applied only when `RUST_LOG` is unset. Keeps
+    // upstream crates (quinn, rustls, h3, hyper, …) quiet by default and
+    // turns up rusnel modules according to the verbosity flags.
+    let default_directive = if opts.debug {
+        "rusnel=trace,info"
+    } else if opts.verbose {
+        "rusnel=debug,info"
+    } else if opts.quiet {
+        "rusnel=warn,warn"
+    } else {
+        "rusnel=info,warn"
+    };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directive));
+
+    let ansi = std::io::stderr().is_terminal();
+    // Compact ISO-8601 UTC down to milliseconds. Long enough to be unambiguous
+    // across days; short enough to keep terminal lines readable.
+    let timer = UtcTime::new(format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    ));
+
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(ansi)
+        .with_target(false)
+        .with_timer(timer);
+
+    match opts.format {
+        LogFormat::Compact => builder.compact().init(),
+        LogFormat::Json => builder
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .init(),
+    }
 }

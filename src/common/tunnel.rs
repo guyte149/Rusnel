@@ -85,10 +85,7 @@ pub async fn client_send_session_hello(
                     hello.remotes.len()
                 ));
             }
-            debug!(
-                "session accepted, {} tunnel(s) registered",
-                tunnel_ids.len()
-            );
+            debug!(count = tunnel_ids.len(), "session hello accepted");
             Ok(tunnel_ids)
         }
         SessionHelloResponse::Failed(reason) => Err(anyhow!("server rejected session: {reason}")),
