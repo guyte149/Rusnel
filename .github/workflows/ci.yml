@@ -33,3 +33,20 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+  # Windows-host build/test. The admin API and `rusnel ctl` are
+  # unix-only (#[cfg(unix)]); the rest of rusnel — tunnels, TLS,
+  # embedded credentials — must keep compiling and passing tests on
+  # Windows so the cross-platform claim doesn't silently regress.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all
+
+      - name: Test (lib + bin only; integration tests gated to unix)
+        run: cargo test --lib --bins

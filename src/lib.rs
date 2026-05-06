@@ -13,6 +13,11 @@ use tracing::{debug, error};
 pub mod cert;
 pub mod client;
 pub mod common;
+// `rusnel ctl` and the admin API it speaks to are unix-socket-based.
+// Both are gated to unix until a Windows named-pipe backend exists,
+// so the rest of rusnel (the data-plane tunnels, TLS, embedded
+// credentials) compiles and runs on Windows.
+#[cfg(unix)]
 pub mod ctl;
 pub mod embedded;
 pub mod server;

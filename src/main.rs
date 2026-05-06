@@ -465,6 +465,10 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
     /// /tmp/rusnel-admin-<uid>.sock (macOS / no XDG); pass --socket to
     /// override. Output defaults to a tab-aligned table; pass --json to
     /// pipe the raw API response.
+    ///
+    /// Unix-only: the admin API speaks HTTP over a unix domain socket.
+    /// On Windows the subcommand is not compiled in.
+    #[cfg(unix)]
     Ctl {
         /// Path to the admin unix socket.
         #[arg(long, value_name = "PATH")]
@@ -477,6 +481,7 @@ sharing <remote-host>:<remote-port> from the client to the server\'s <local-host
     },
 }
 
+#[cfg(unix)]
 #[derive(Debug, Subcommand)]
 enum CtlAction {
     /// Print server info: version, listen address, uptime, client count.
@@ -1196,10 +1201,27 @@ fn main() {
                 // — opt out with `--no-admin-socket`, override with
                 // `--admin-socket <PATH>`. Clap enforces the
                 // mutual-exclusion via `conflicts_with`.
+                //
+                // Unix-only: the admin API speaks HTTP over a unix
+                // domain socket. On Windows we always disable it,
+                // and warn loudly if the operator explicitly asked
+                // for one — silently dropping the flag would be
+                // worse than a one-line warning at startup.
+                #[cfg(unix)]
                 admin_socket: if no_admin_socket {
                     None
                 } else {
                     Some(admin_socket.unwrap_or_else(rusnel::ctl::default_socket_path))
+                },
+                #[cfg(not(unix))]
+                admin_socket: {
+                    if admin_socket.is_some() {
+                        eprintln!(
+                            "warning: --admin-socket is unix-only and will be ignored on this platform"
+                        );
+                    }
+                    let _ = no_admin_socket;
+                    None
                 },
             };
             debug!(?server_config, "server config resolved");
@@ -1347,6 +1369,7 @@ fn main() {
             debug!(?client_config, "client config resolved");
             run_client(client_config);
         }
+        #[cfg(unix)]
         Mode::Ctl {
             socket,
             json,
@@ -1374,6 +1397,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn run_ctl(socket: &std::path::Path, json: bool, action: CtlAction) -> anyhow::Result<()> {
     use rusnel::ctl::{self, Format};
     let format = if json { Format::Json } else { Format::Table };

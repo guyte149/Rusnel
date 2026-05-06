@@ -1,6 +1,11 @@
+// The admin HTTP API is unix-socket-only (see `crate::ctl`); on
+// Windows the module isn't compiled and the server simply never
+// spawns it.
+#[cfg(unix)]
 pub mod admin;
 pub mod state;
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -48,6 +53,12 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
     // Optional admin HTTP listener bound to a unix socket. Spawned alongside
     // the accept loop so a failure to bind / serve doesn't take the tunnel
     // server down — we just log the error and keep running.
+    //
+    // The admin API is unix-socket-only (see `crate::ctl`); on Windows we
+    // simply never spawn it, even if `admin_socket` is `Some(...)`. The
+    // caller (`main.rs`) is responsible for warning the operator if they
+    // explicitly passed `--admin-socket` on Windows.
+    #[cfg(unix)]
     let admin_handle: Option<tokio::task::JoinHandle<()>> = config
         .admin_socket
         .as_ref()
@@ -76,14 +87,17 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
                 info!("shutdown signal received, notifying clients");
                 endpoint.close(VarInt::from_u32(CLOSE_CODE_SERVER_SHUTDOWN), b"server received ^C");
                 endpoint.wait_idle().await;
-                if let Some(h) = admin_handle {
-                    h.abort();
-                    // The admin task is responsible for unlinking its
-                    // socket file on shutdown; abort()ing while bound is
-                    // OK because it owns nothing the OS won't reap.
-                }
-                if let Some(path) = &config.admin_socket {
-                    let _ = std::fs::remove_file(path);
+                #[cfg(unix)]
+                {
+                    if let Some(h) = admin_handle {
+                        h.abort();
+                        // The admin task is responsible for unlinking its
+                        // socket file on shutdown; abort()ing while bound is
+                        // OK because it owns nothing the OS won't reap.
+                    }
+                    if let Some(path) = &config.admin_socket {
+                        let _ = std::fs::remove_file(path);
+                    }
                 }
                 info!("server stopped");
                 return Ok(());
@@ -140,6 +154,7 @@ pub async fn run_async(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_admin(state: ServerState, path: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = admin::serve(state, &path).await {
