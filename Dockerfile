@@ -14,7 +14,7 @@
 # Build multi-arch (driven by .github/workflows/release.yml):
 #     docker buildx build --platform linux/amd64,linux/arm64 -t rusnel .
 
-ARG RUST_VERSION=1.85
+ARG RUST_VERSION=1.88
 ARG DEBIAN_VERSION=bookworm
 
 FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
