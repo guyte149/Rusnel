@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-05-05
+
+### Fixed
+
+- **Bump the Dockerfile's Rust toolchain to 1.85.** The previous pin
+  (`1.83`) couldn't parse `cpufeatures 0.3.0`'s manifest, which uses
+  `edition = "2024"` and needs Cargo 1.85+. The cargo build failed
+  silently inside the BuildKit stage, surfacing only as a confusing
+  "`/usr/local/bin/rusnel`: not found" during the subsequent
+  `COPY --from=builder`. v0.10.0 and v0.10.1 had no working GHCR
+  image for this reason; v0.10.2 does.
+
 ## [0.10.1] - 2026-05-05
 
 Release-pipeline fixes shaken out by the first `v0.10.0` tag.
