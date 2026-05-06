@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-05-06
+
+### Fixed
+
+- **Dockerfile Rust toolchain bumped to 1.85.** The 1.83 pin couldn't
+  parse `clap_lex 1.1.0`'s manifest (and `cpufeatures 0.3.0` etc.),
+  which use `edition = "2024"` and need Cargo 1.85+. The cargo build
+  failed silently inside the BuildKit stage, surfacing only as a
+  confusing `/usr/local/bin/rusnel: not found` during the multi-stage
+  `COPY --from=builder`. v0.10.0, v0.10.1, and v0.11.0 had no
+  working GHCR image for this reason; v0.11.1 does.
+
 ## [0.11.0] - 2026-05-06
 
 Windows support. Tunnels, TLS, and embedded credentials now compile
