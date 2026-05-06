@@ -1,0 +1,19 @@
+# Rusnel cargo config.
+#
+# Applied automatically by cargo to every build run from this
+# repository (the file is found via the standard "walk up from CWD"
+# search). Keeping it here rather than in a CI script means local
+# `cargo build`s on Windows produce the same artifact CI does.
+
+# Statically link the Microsoft C runtime on `*-windows-msvc` targets.
+# Without this the released `.exe` depends on `vcruntime140.dll` and
+# friends from the Visual C++ Redistributable, which is not present
+# on a stock Windows install — users would hit a "missing DLL"
+# popup. With `+crt-static` the binary is genuinely standalone and
+# matches the "single static binary" promise we make for Linux and
+# macOS. The cost is ~2 MB of extra binary size.
+#
+# Scoped to `target_env = "msvc"` so MSYS2 / GNU Windows targets
+# (`*-windows-gnu`) and every non-Windows target are unaffected.
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]

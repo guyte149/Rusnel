@@ -60,11 +60,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          # Windows is not yet supported: src/server/admin.rs uses
-          # tokio::net::UnixListener + POSIX `Permissions::set_mode`
-          # unconditionally. Add `x86_64-pc-windows-msvc` back here
-          # once the admin API is `#[cfg(unix)]`-gated (or backed by a
-          # named pipe on Windows).
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:

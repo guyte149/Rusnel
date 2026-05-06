@@ -5,6 +5,11 @@
 //! TCP tunnel, and then exercises every `GET /api/v1/...` endpoint over
 //! the unix socket to verify the JSON shape, byte counters, and history
 //! recording.
+//!
+//! Unix-only — the admin API is unix-socket-based and `rusnel::ctl` is
+//! not compiled on Windows.
+
+#![cfg(unix)]
 
 mod common;
 

@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-05-06
+
+Windows support. Tunnels, TLS, and embedded credentials now compile
+and run on `x86_64-pc-windows-msvc`; only the unix-socket-based
+admin API and `rusnel ctl` are gated off.
+
+### Added
+
+- **Windows build**, gated through CI: a new `windows-latest` job in
+  `.github/workflows/ci.yml` runs `cargo build --all` and the `--lib
+  --bins` test set on every PR, and `x86_64-pc-windows-msvc` is back
+  in `release.yml`'s prebuilt-binary matrix.
+- **Static CRT linkage on `*-windows-msvc`** via
+  `.cargo/config.toml` (`-C target-feature=+crt-static`). The
+  released `.exe` no longer depends on the Visual C++ Redistributable
+  (`vcruntime140.dll` etc.) — it runs on a stock Windows install
+  with no separate runtime install, matching the single-static-binary
+  promise on Linux and macOS. Adds ~2 MB to the binary.
+
+### Changed
+
+- `crate::ctl` and `crate::server::admin` are now `#[cfg(unix)]`. The
+  `Mode::Ctl` subcommand and its `CtlAction` variants are also
+  Windows-omitted, so `rusnel --help` shows the platform-correct
+  command list.
+- `--admin-socket` / `--no-admin-socket` are still accepted on
+  Windows for argument compatibility, but `--admin-socket <PATH>`
+  prints a one-line warning and is ignored. Future named-pipe
+  support can re-enable this without breaking flags.
+- Integration tests that hit the admin API (`tests/admin.rs`) are
+  gated to unix via `#![cfg(unix)]`.
+
 ## [0.10.1] - 2026-05-05
 
 Release-pipeline fixes shaken out by the first `v0.10.0` tag.

@@ -46,10 +46,13 @@ cd Rusnel
 cargo build --release
 ```
 
-Pre-built binaries for Linux (x86_64 + aarch64, gnu and musl) and
-macOS (x86_64 + Apple Silicon) are attached to each
+Pre-built binaries for Linux (x86_64 + aarch64, gnu and musl), macOS
+(x86_64 + Apple Silicon), and Windows (x86_64) are attached to each
 [GitHub release](https://github.com/guyte149/Rusnel/releases).
-Windows is not yet supported (the admin API is Unix-socket-only).
+
+On Windows the admin HTTP API and the `rusnel ctl` subcommand are
+not available — both are Unix-socket-based. Tunnels, TLS, and
+embedded credentials work the same as on Unix.
 
 ### Docker
 
