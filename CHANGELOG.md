@@ -17,6 +17,12 @@ admin API and `rusnel ctl` are gated off.
   `.github/workflows/ci.yml` runs `cargo build --all` and the `--lib
   --bins` test set on every PR, and `x86_64-pc-windows-msvc` is back
   in `release.yml`'s prebuilt-binary matrix.
+- **Static CRT linkage on `*-windows-msvc`** via
+  `.cargo/config.toml` (`-C target-feature=+crt-static`). The
+  released `.exe` no longer depends on the Visual C++ Redistributable
+  (`vcruntime140.dll` etc.) — it runs on a stock Windows install
+  with no separate runtime install, matching the single-static-binary
+  promise on Linux and macOS. Adds ~2 MB to the binary.
 
 ### Changed
 
