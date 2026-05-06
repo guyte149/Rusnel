@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-05-06
+
+### Fixed
+
+- **Dockerfile Rust toolchain bumped to 1.88.** v0.11.1 bumped it to
+  1.85 to fix the `edition = "2024"` parse error from `clap_lex` and
+  `cpufeatures`, but the build then immediately tripped on
+  `time 0.3.47`'s new MSRV (`rustc 1.85.1 is not supported … requires
+  rustc 1.88.0`). Bump to the version `time` actually wants.
+
 ## [0.11.1] - 2026-05-06
 
 ### Fixed
